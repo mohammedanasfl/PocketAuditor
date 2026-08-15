@@ -1,3 +1,12 @@
+---
+title: PocketAuditor
+emoji: 💰
+colorFrom: blue
+colorTo: green
+sdk: docker
+app_port: 7860
+---
+
 # PocketAuditor — Statement Reconciliation Agent
 
 A Telegram bot that reconciles bank/UPI transactions against a manual expense
