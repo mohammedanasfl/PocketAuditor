@@ -64,6 +64,13 @@ async def handle_start_command(update: Update, context: ContextTypes.DEFAULT_TYP
     await update.message.reply_text(_WELCOME_TEXT)
 
 
+async def handle_help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message is None:
+        return
+    logger.info("chat=%s: /help", update.effective_chat.id)
+    await update.message.reply_text(_WELCOME_TEXT)
+
+
 async def handle_spend_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message is None:
         return

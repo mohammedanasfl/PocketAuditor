@@ -33,21 +33,30 @@ Respond with exactly one JSON object matching the schema you were given. \
 reasoning is one sentence explaining the decision."""
 
 
-PARSE_SYSTEM = """You extract structured fields from the body of a forwarded \
-Indian bank or UPI SMS notification.
+PARSE_SYSTEM = """You extract structured fields from a message that was \
+forwarded to a bank/UPI SMS reconciliation bot. Most messages are genuine \
+Indian bank or UPI SMS notifications, but some aren't (a stray greeting, a \
+question, random text) — you must tell these apart rather than guessing a \
+transaction into existence.
 
-Extract:
+Fields:
+- is_transaction: true only if the message is actually a bank/UPI \
+transaction notification (it names an amount that moved). false for \
+anything else — a greeting, a question, an unrelated forward, or any text \
+with no real amount in it. It is always safe to say false rather than \
+invent a plausible-looking transaction.
 - amount: the transaction amount as a plain number, no currency symbol or \
-commas.
+commas. null if is_transaction is false.
 - merchant: the merchant, payee, or VPA name the money moved to/from, or \
-null if you cannot identify one. If it has an obvious typo or abbreviation \
-(e.g. "sncks", "amzn", "swgy"), normalize it to the clear spelling (e.g. \
-"Snacks", "Amazon", "Swiggy"). If you're not confident what a garbled name \
-should be, keep it as written rather than guessing.
+null if you cannot identify one (or if is_transaction is false). If it has \
+an obvious typo or abbreviation (e.g. "sncks", "amzn", "swgy"), normalize it \
+to the clear spelling (e.g. "Snacks", "Amazon", "Swiggy"). If you're not \
+confident what a garbled name should be, keep it as written rather than \
+guessing.
 - txn_date: the transaction date as YYYY-MM-DD. If the message has no date, \
-use the reference date you were given.
+use the reference date you were given. null if is_transaction is false.
 - is_debit: true if money left the account (spent/paid/withdrawn/debited), \
-false if money arrived (received/credited).
+false if money arrived (received/credited). null if is_transaction is false.
 
 Respond with exactly one JSON object matching the schema you were given."""
 

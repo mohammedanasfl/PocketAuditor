@@ -138,7 +138,9 @@ async def test_missing_date_still_resolved_by_regex_with_default_today():
 async def test_low_confidence_message_routes_to_llm_fallback():
     # No date, no merchant, only amount -> confidence 0.5, below threshold.
     text = "Rs.75 debited. Avl Bal Rs.500.00"
-    extraction = LLMExtraction(amount=75.0, merchant="Unknown", txn_date=date(2026, 8, 1), is_debit=True)
+    extraction = LLMExtraction(
+        is_transaction=True, amount=75.0, merchant="Unknown", txn_date=date(2026, 8, 1), is_debit=True
+    )
     provider = _FakeFallbackProvider(extraction=extraction)
 
     result = await parse_sms(text, provider=provider)
@@ -177,7 +179,32 @@ async def test_garbage_message_never_calls_decide_match():
     # Sanity check that the parser only ever calls parse_transaction, never
     # decide_match, regardless of path.
     provider = _FakeFallbackProvider(
-        extraction=LLMExtraction(amount=10.0, merchant=None, txn_date=date.today(), is_debit=True)
+        extraction=LLMExtraction(is_transaction=True, amount=10.0, merchant=None, txn_date=date.today(), is_debit=True)
     )
     await parse_sms("some ambiguous text with Rs.10 in it somewhere", provider=provider)
     assert provider.calls == 1
+
+
+# --- LLM says "not a transaction" — must not fabricate one anyway ----------
+
+
+async def test_llm_says_not_a_transaction_raises_parse_error():
+    """Regression: a stray non-transaction message (e.g. "Help") must not
+    come back as a fabricated Rs.0.00 credit — the LLM saying
+    is_transaction=False must be trusted and rejected, not smoothed over."""
+    extraction = LLMExtraction(is_transaction=False, amount=None, merchant=None, txn_date=None, is_debit=None)
+    provider = _FakeFallbackProvider(extraction=extraction)
+
+    with pytest.raises(ParseError):
+        await parse_sms("Help", provider=provider)
+    assert provider.calls == 1
+
+
+async def test_llm_says_transaction_but_omits_amount_still_raises():
+    """Defensive guard: even if is_transaction=True, a missing amount means
+    there's nothing to log — don't trust the flag alone."""
+    extraction = LLMExtraction(is_transaction=True, amount=None, merchant=None, txn_date=None, is_debit=None)
+    provider = _FakeFallbackProvider(extraction=extraction)
+
+    with pytest.raises(ParseError):
+        await parse_sms("some confusing text", provider=provider)

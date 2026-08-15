@@ -20,7 +20,7 @@ from app.config import settings
 from app.db import SessionLocal
 from app.logging_config import configure_logging
 from app.models import User
-from app.telegram.bot import build_application
+from app.telegram.bot import build_application, set_bot_commands
 from app.telegram.handlers import send_ask_user_message
 
 configure_logging()  # must run before anything below logs — see app/logging_config.py
@@ -33,6 +33,7 @@ async def lifespan(app: FastAPI):
     application = build_application()
     await application.initialize()
     await application.start()
+    await set_bot_commands(application)
     app.state.application = application
 
     if settings.run_mode == "polling":

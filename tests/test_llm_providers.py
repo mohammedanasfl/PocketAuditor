@@ -53,7 +53,13 @@ def _decision_json(matched_id: str | None) -> str:
 
 def _extraction_json() -> str:
     return json.dumps(
-        {"amount": 450.0, "merchant": "Blinkit", "txn_date": "2026-08-10", "is_debit": True}
+        {
+            "is_transaction": True,
+            "amount": 450.0,
+            "merchant": "Blinkit",
+            "txn_date": "2026-08-10",
+            "is_debit": True,
+        }
     )
 
 

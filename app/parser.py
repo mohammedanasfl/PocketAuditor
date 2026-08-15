@@ -219,6 +219,13 @@ async def parse_sms(raw_text: str, provider: LLMProvider) -> ParsedTransaction:
         logger.warning("could not extract a transaction from this message: %s", exc)
         raise ParseError(f"Could not extract a transaction from this message: {exc}") from exc
 
+    # Re-check in code rather than trust is_transaction/amount alone — same
+    # reasoning as agent.py's _apply_guard: a model saying "yes, and here's
+    # the amount" is only useful if there's actually a usable amount behind it.
+    if not extraction.is_transaction or extraction.amount is None:
+        logger.info("llm fallback: not a transaction (%r)", raw_text[:40])
+        raise ParseError("This message doesn't look like a bank/UPI transaction alert.")
+
     logger.info(
         "parsed via llm: amount=%s merchant=%r txn_date=%s is_debit=%s",
         extraction.amount, extraction.merchant, extraction.txn_date, extraction.is_debit,
@@ -226,8 +233,8 @@ async def parse_sms(raw_text: str, provider: LLMProvider) -> ParsedTransaction:
     return ParsedTransaction(
         amount=Decimal(str(extraction.amount)).quantize(Decimal("0.01")),
         merchant=extraction.merchant,
-        txn_date=extraction.txn_date,
-        is_debit=extraction.is_debit,
+        txn_date=extraction.txn_date or date.today(),
+        is_debit=extraction.is_debit if extraction.is_debit is not None else True,
         confidence=1.0,
         method="llm",
     )

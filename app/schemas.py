@@ -38,14 +38,21 @@ class LLMExtraction(BaseModel):
     """Output of LLMProvider.parse_transaction — fields an LLM can pull out of
     a forwarded SMS body when the regex-first pass isn't confident enough.
     Combined with regex-derived confidence/method by app/parser.py (Stage 3).
+
+    `is_transaction` exists for the same reason ExtractedReceipt.readable
+    does: without an explicit escape hatch, a structured-output schema forces
+    the model to fabricate a plausible-looking amount/date even for text that
+    isn't a transaction at all (e.g. a stray "Help" message) — there's no way
+    to say "there's nothing here" other than an explicit field for it.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    amount: float
+    is_transaction: bool
+    amount: float | None
     merchant: str | None
-    txn_date: date
-    is_debit: bool
+    txn_date: date | None
+    is_debit: bool | None
 
 
 class ExtractedReceipt(BaseModel):
