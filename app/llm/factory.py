@@ -19,4 +19,8 @@ def get_provider() -> LLMProvider:
         from app.llm.claude import ClaudeProvider
 
         return ClaudeProvider()
+    if settings.llm_provider == "gemini":
+        from app.llm.gemini import GeminiProvider
+
+        return GeminiProvider()
     raise ValueError(f"Unknown LLM_PROVIDER: {settings.llm_provider!r}")

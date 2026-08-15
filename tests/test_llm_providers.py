@@ -17,6 +17,7 @@ from httpx import Response
 
 from app.llm.base import LLMDecisionError, sanitize_schema_for_llm
 from app.llm.claude import ClaudeProvider
+from app.llm.gemini import GeminiProvider
 from app.llm.ollama import OllamaProvider
 from app.schemas import MatchDecision, QueryIntent
 
@@ -91,6 +92,13 @@ def _fake_claude_create(text: str):
         return SimpleNamespace(content=[SimpleNamespace(type="text", text=text)])
 
     return _create
+
+
+def _fake_gemini_generate(text: str):
+    async def _generate(**kwargs):
+        return SimpleNamespace(text=text)
+
+    return _generate
 
 
 # --- schema sanitizer ------------------------------------------------------
@@ -348,6 +356,82 @@ async def test_claude_interpret_query_invalid_response_raises(monkeypatch):
         await provider.interpret_query("nonsense question")
 
 
+# --- GeminiProvider ----------------------------------------------------------
+
+
+async def test_gemini_decide_match_valid_response(monkeypatch):
+    provider = GeminiProvider(api_key="test-key", model="gemini-flash-lite-latest")
+    monkeypatch.setattr(
+        provider._client.aio.models, "generate_content", _fake_gemini_generate(_decision_json(CANDIDATE_ID))
+    )
+    decision = await provider.decide_match(TRANSACTION, CANDIDATES)
+    assert decision.action == "auto_link"
+    assert str(decision.matched_expense_id) == CANDIDATE_ID
+
+
+async def test_gemini_decide_match_invalid_response_raises(monkeypatch):
+    provider = GeminiProvider(api_key="test-key", model="gemini-flash-lite-latest")
+    monkeypatch.setattr(provider._client.aio.models, "generate_content", _fake_gemini_generate("not json"))
+    with pytest.raises(LLMDecisionError):
+        await provider.decide_match(TRANSACTION, CANDIDATES)
+
+
+async def test_gemini_parse_transaction_valid_response(monkeypatch):
+    provider = GeminiProvider(api_key="test-key", model="gemini-flash-lite-latest")
+    monkeypatch.setattr(provider._client.aio.models, "generate_content", _fake_gemini_generate(_extraction_json()))
+    extraction = await provider.parse_transaction("Rs.450 debited from A/c XX1234 at BLINKIT on 10-08-26")
+    assert extraction.amount == 450.0
+    assert extraction.is_debit is True
+
+
+async def test_gemini_extract_receipt_clear_image_returns_readable(monkeypatch):
+    provider = GeminiProvider(api_key="test-key", model="gemini-flash-lite-latest")
+    monkeypatch.setattr(
+        provider._client.aio.models,
+        "generate_content",
+        _fake_gemini_generate(_receipt_json(readable=True, merchant="Reliance Fresh", total_amount=450.0)),
+    )
+    receipt = await provider.extract_receipt(FAKE_IMAGE_BYTES, "image/jpeg")
+    assert receipt.readable is True
+    assert receipt.merchant == "Reliance Fresh"
+    assert receipt.total_amount == 450.0
+
+
+async def test_gemini_extract_receipt_blurry_image_returns_unreadable(monkeypatch):
+    provider = GeminiProvider(api_key="test-key", model="gemini-flash-lite-latest")
+    monkeypatch.setattr(
+        provider._client.aio.models, "generate_content", _fake_gemini_generate(_receipt_json(readable=False))
+    )
+    receipt = await provider.extract_receipt(FAKE_IMAGE_BYTES, "image/jpeg")
+    assert receipt.readable is False
+    assert receipt.total_amount is None
+
+
+async def test_gemini_extract_receipt_invalid_response_raises(monkeypatch):
+    provider = GeminiProvider(api_key="test-key", model="gemini-flash-lite-latest")
+    monkeypatch.setattr(provider._client.aio.models, "generate_content", _fake_gemini_generate("not json"))
+    with pytest.raises(LLMDecisionError):
+        await provider.extract_receipt(FAKE_IMAGE_BYTES, "image/jpeg")
+
+
+async def test_gemini_interpret_query_valid_response(monkeypatch):
+    provider = GeminiProvider(api_key="test-key", model="gemini-flash-lite-latest")
+    monkeypatch.setattr(
+        provider._client.aio.models, "generate_content", _fake_gemini_generate(_query_intent_json())
+    )
+    intent = await provider.interpret_query("how much did I spend on food this week")
+    assert intent.category == "Food"
+    assert intent.date_range == "this_week"
+    assert intent.aggregation == "sum"
+
+
+async def test_gemini_interpret_query_invalid_response_raises(monkeypatch):
+    provider = GeminiProvider(api_key="test-key", model="gemini-flash-lite-latest")
+    monkeypatch.setattr(provider._client.aio.models, "generate_content", _fake_gemini_generate("not json"))
+    with pytest.raises(LLMDecisionError):
+        await provider.interpret_query("nonsense question")
+
+
 # --- parity: the brief's core requirement -----------------------------------
 
 
@@ -368,7 +452,11 @@ async def test_decide_match_identical_across_providers(monkeypatch):
     monkeypatch.setattr(claude._client.messages, "create", _fake_claude_create(decision_json))
     claude_decision = await claude.decide_match(TRANSACTION, CANDIDATES)
 
-    assert ollama_decision == claude_decision
+    gemini = GeminiProvider(api_key="test-key", model="gemini-flash-lite-latest")
+    monkeypatch.setattr(gemini._client.aio.models, "generate_content", _fake_gemini_generate(decision_json))
+    gemini_decision = await gemini.decide_match(TRANSACTION, CANDIDATES)
+
+    assert ollama_decision == claude_decision == gemini_decision
 
 
 @respx.mock
@@ -386,7 +474,11 @@ async def test_parse_transaction_identical_across_providers(monkeypatch):
     monkeypatch.setattr(claude._client.messages, "create", _fake_claude_create(extraction_json))
     claude_extraction = await claude.parse_transaction(raw_sms)
 
-    assert ollama_extraction == claude_extraction
+    gemini = GeminiProvider(api_key="test-key", model="gemini-flash-lite-latest")
+    monkeypatch.setattr(gemini._client.aio.models, "generate_content", _fake_gemini_generate(extraction_json))
+    gemini_extraction = await gemini.parse_transaction(raw_sms)
+
+    assert ollama_extraction == claude_extraction == gemini_extraction
 
 
 @respx.mock
@@ -403,5 +495,9 @@ async def test_interpret_query_identical_across_providers(monkeypatch):
     monkeypatch.setattr(claude._client.messages, "create", _fake_claude_create(intent_json))
     claude_intent = await claude.interpret_query("how much on food this week")
 
-    assert ollama_intent == claude_intent
+    gemini = GeminiProvider(api_key="test-key", model="gemini-flash-lite-latest")
+    monkeypatch.setattr(gemini._client.aio.models, "generate_content", _fake_gemini_generate(intent_json))
+    gemini_intent = await gemini.interpret_query("how much on food this week")
+
+    assert ollama_intent == claude_intent == gemini_intent
     assert isinstance(ollama_intent, QueryIntent)

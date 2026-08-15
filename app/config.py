@@ -23,9 +23,10 @@ class Settings(BaseSettings):
     )
 
     # --- LLM provider -----------------------------------------------------
-    llm_provider: Literal["ollama", "claude"] = "ollama"
+    llm_provider: Literal["ollama", "claude", "gemini"] = "ollama"
     llm_model: str = "qwen2.5vl:7b"
     anthropic_api_key: str | None = None
+    gemini_api_key: str | None = None
     ollama_base_url: str = "http://localhost:11434"
 
     # --- Agent behaviour --------------------------------------------------

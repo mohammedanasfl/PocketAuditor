@@ -12,8 +12,8 @@ transaction, an LLM-backed agent decides whether to:
 
 Every decision (and its reasoning) is written to `reconciliation_runs` for
 auditability. The LLM sits behind one interface (`LLMProvider`) so a local
-Ollama model (dev) and Claude (prod) are drop-in interchangeable — see
-`app/llm/`.
+Ollama model (dev), Claude, and Gemini are all drop-in interchangeable — see
+`app/llm/` and [Choosing an LLM provider](#choosing-an-llm-provider) below.
 
 Phase 3a adds monthly per-category budgets (`/setbudget`, `/budgets`) with a
 deterministic (no-LLM) alert when a category crosses 80% of its limit — see
@@ -27,7 +27,7 @@ intent the LLM fills in — never raw SQL — see
 ```
 app/
   config.py, db.py, models.py, schemas.py   settings, DB, ORM models, Pydantic schemas
-  llm/          LLMProvider Protocol + OllamaProvider + ClaudeProvider + factory
+  llm/          LLMProvider Protocol + Ollama/Claude/Gemini providers + factory
   parser.py     regex-first SMS parser, LLM fallback for ambiguous messages
   agent.py      perceive -> compare -> decide -> act loop
   budgets.py    deterministic budget-threshold alerts — no LLM involved
@@ -66,10 +66,10 @@ ollama pull qwen2.5vl:7b
 
 Verify it's up: `curl http://localhost:11434/api/tags`
 
-`qwen2.5vl:7b` (Qwen2.5-VL, the default `LLM_MODEL`) handles all three
-`LLMProvider` methods — `decide_match`, `parse_transaction`, *and*
-`extract_receipt` — since it's vision-capable as well as text-capable, same
-family as the original text-only `qwen2.5:7b`. See
+`qwen2.5vl:7b` (Qwen2.5-VL, the default `LLM_MODEL`) handles all four
+`LLMProvider` methods — `decide_match`, `parse_transaction`, `extract_receipt`,
+*and* `interpret_query` — since it's vision-capable as well as text-capable,
+same family as the original text-only `qwen2.5:7b`. See
 [Photo receipts](#photo-receipts-phase-2) below for more on the vision side.
 
 ### 3. Neon Postgres
@@ -111,8 +111,10 @@ cp .env.example .env
 ```
 
 `LLM_PROVIDER=ollama` / `LLM_MODEL=qwen2.5vl:7b` are the defaults and need
-nothing else. Only set `ANTHROPIC_API_KEY` if you switch
-`LLM_PROVIDER=claude` (e.g. to test the prod path locally).
+nothing else. Only set `ANTHROPIC_API_KEY` if you switch to
+`LLM_PROVIDER=claude`, or `GEMINI_API_KEY` if you switch to
+`LLM_PROVIDER=gemini` — see
+[Choosing an LLM provider](#choosing-an-llm-provider) below for the tradeoffs.
 
 ### 6. Run the migration
 
@@ -219,6 +221,40 @@ doesn't mean daily *nagging* — just a daily *check*.
 ping (e.g. from [cron-job.org](https://cron-job.org) or the same GitHub
 Actions workflow on a shorter schedule) can hit it without waiting on a
 possibly-suspended Neon compute to wake up.
+
+---
+
+## Choosing an LLM provider
+
+Three interchangeable `LLMProvider` implementations exist (`app/llm/ollama.py`,
+`app/llm/claude.py`, `app/llm/gemini.py`) — all four methods
+(`decide_match`, `parse_transaction`, `extract_receipt`, `interpret_query`),
+same structured-output contract, swap with one `.env` line.
+
+| | `LLM_PROVIDER=ollama` | `LLM_PROVIDER=claude` | `LLM_PROVIDER=gemini` |
+|---|---|---|---|
+| Cost | Free (your hardware) | Pay-per-request | **Free** (generous daily quota) |
+| Setup | `ollama serve` running locally | `ANTHROPIC_API_KEY` | `GEMINI_API_KEY` |
+| Where it runs | Your machine only | Cloud — deployable anywhere | Cloud — deployable anywhere |
+| Data privacy | Never leaves your machine | Anthropic's standard API terms | **Free tier: Google may use prompts/responses to improve their models** |
+
+**Gemini is the recommended free option if you want this deployed somewhere
+other than your own laptop** (see [Running it](#running-it) — a long-poller
+needs *something* up 24/7). Get a key at
+[aistudio.google.com](https://aistudio.google.com) → "Get API key" → "Create
+API key" — no credit card, no billing account, genuinely free with no
+expiration. Set `LLM_MODEL` to one of Google's `-latest` aliases
+(`gemini-flash-lite-latest` is the default here) rather than a pinned version
+like `gemini-2.5-flash` — Google retires specific dated model versions for
+new API keys fairly often (that exact 404 happened during this project's own
+setup), while the `-latest` aliases keep pointing at whatever's current.
+
+One caveat worth knowing: Gemini's free tier occasionally returns a `503
+UNAVAILABLE` ("high demand") error on `-latest`-alias models, especially the
+non-lite tier — this surfaces as `LLMDecisionError` same as any other
+provider hiccup (see `app/llm/base.py`'s `LLMDecisionError` contract), so
+existing retry/guard/graceful-fallback behavior already covers it; it just
+means an occasional message needs a retry rather than being unusable.
 
 ---
 
@@ -335,13 +371,14 @@ rather than trusting the model's own arithmetic.
 pytest
 ```
 
-108 tests, all offline (mocked HTTP/API calls, aiosqlite for DB tests) — no
-live Ollama, Telegram, or Neon connection required. Covers:
+116 tests, all offline (mocked HTTP/API calls, aiosqlite for DB tests) — no
+live Ollama, Telegram, Neon, or Gemini/Claude connection required. Covers:
 
 - **Provider parity** (`tests/test_llm_providers.py`,
   `tests/test_agent_provider_parity.py`) — identical mocked model output run
-  through `OllamaProvider` and `ClaudeProvider` (and through the full agent
-  loop) produces byte-for-byte equal results, now including `interpret_query`.
+  through `OllamaProvider`, `ClaudeProvider`, and `GeminiProvider` (and
+  through the full agent loop) produces byte-for-byte equal results across
+  all three, for every method including `interpret_query`.
   `test_llm_providers.py` also covers `extract_receipt` (a clear receipt, a
   blurry one, a non-receipt image — all assert on `readable` rather than a
   hallucinated total) and that an Ollama-side HTTP failure (e.g. a
@@ -394,7 +431,9 @@ python -m scripts.try_decide --both    # Ollama and Claude side by side (needs A
 ```
 
 (This script now also exercises `interpret_query` alongside `decide_match`
-and `parse_transaction`.)
+and `parse_transaction`. `--both` compares Ollama and Claude specifically;
+to try Gemini instead, just set `LLM_PROVIDER=gemini` in `.env` and run
+without `--both` — `get_provider()` picks it up like any other provider.)
 
 ---
 
