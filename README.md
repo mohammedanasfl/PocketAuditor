@@ -380,7 +380,15 @@ rather than trusting the model's own arithmetic.
 pytest
 ```
 
-116 tests, all offline (mocked HTTP/API calls, aiosqlite for DB tests) — no
+Runs automatically on every push/PR to `main` via
+`.github/workflows/ci.yml` — no secrets required, since the whole suite is
+offline (`DATABASE_URL`/`TELEGRAM_BOT_TOKEN` in that workflow are just
+placeholders to satisfy `Settings()`'s required fields at import time; the
+tests themselves never connect to Postgres or Telegram). This is CI only —
+Render keeps deploying on every push to `main` exactly as it already did;
+this workflow doesn't gate that.
+
+119 tests, all offline (mocked HTTP/API calls, aiosqlite for DB tests) — no
 live Ollama, Telegram, Neon, or Gemini/Claude connection required. Covers:
 
 - **Provider parity** (`tests/test_llm_providers.py`,

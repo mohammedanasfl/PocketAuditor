@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    # Settings() requires these at import time, but the test suite never
+    # actually connects to Postgres or Telegram (aiosqlite + mocked HTTP
+    # only, per app/db.py's lazy engine and tests/conftest.py's own sqlite
+    # engine) — placeholders satisfy Pydantic without needing real secrets.
+    env:
+      DATABASE_URL: postgresql+asyncpg://ci:ci@localhost:5432/ci
+      TELEGRAM_BOT_TOKEN: "000000:ci-placeholder-token"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: pytest
