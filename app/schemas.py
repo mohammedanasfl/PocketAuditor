@@ -1,0 +1,84 @@
+"""Pydantic models shared by the LLM interface.
+
+Both providers are constrained by JSON Schema generated from these same
+models, and both return a value validated by that same model — that's what
+makes "identical shape regardless of provider" enforceable by construction
+rather than by convention.
+
+Fields typed `X | None` with no Python-level default (e.g. `matched_expense_id`)
+are deliberate: Pydantic v2 only treats a field as optional when it has an
+explicit default, so omitting one keeps the field in the generated schema's
+"required" list while the type itself stays nullable. That's the standard
+"required-nullable-field" idiom structured-output schemas expect — the model
+must always emit the key, using null when it doesn't apply.
+"""
+
+from __future__ import annotations
+
+from datetime import date
+from typing import Literal
+from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class MatchDecision(BaseModel):
+    """Output of LLMProvider.decide_match."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["auto_link", "auto_log", "ask_user"]
+    matched_expense_id: UUID | None
+    suggested_category: str | None
+    confidence: float = Field(ge=0.0, le=1.0)
+    reasoning: str
+
+
+class LLMExtraction(BaseModel):
+    """Output of LLMProvider.parse_transaction — fields an LLM can pull out of
+    a forwarded SMS body when the regex-first pass isn't confident enough.
+    Combined with regex-derived confidence/method by app/parser.py (Stage 3).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    amount: float
+    merchant: str | None
+    txn_date: date
+    is_debit: bool
+
+
+class ExtractedReceipt(BaseModel):
+    """Output of LLMProvider.extract_receipt — Phase 2 photo capture. `readable`
+    is the field the rest of Phase 2 trusts most: it must be false whenever the
+    image is too blurry/dark/cropped to trust total_amount, or isn't a
+    bill/receipt at all, rather than the model guessing a plausible number."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    merchant: str | None
+    total_amount: float | None
+    txn_date: date | None
+    line_items: list[str] | None
+    confidence: float = Field(ge=0.0, le=1.0)
+    readable: bool
+
+
+class QueryIntent(BaseModel):
+    """Output of LLMProvider.interpret_query — Phase 3b NL query chat.
+
+    This is the *only* thing an LLM ever produces for a query: a small fixed
+    intent, never SQL and never free text. app/query.py is the one place
+    that turns a QueryIntent into a real, parameterized SQLAlchemy query —
+    the LLM never sees or writes SQL, which is the actual safety property
+    that matters for a personal-finance bot.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    category: str | None
+    date_range: Literal["today", "this_week", "last_week", "this_month", "last_month", "custom"]
+    custom_start: date | None
+    custom_end: date | None
+    aggregation: Literal["sum", "count", "max", "list"]
+    intent_summary: str
