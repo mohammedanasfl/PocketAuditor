@@ -42,7 +42,11 @@ class ClaudeProvider:
         self._model = model or settings.llm_model
 
     async def _create_json(self, system: str, user: str | list[dict], schema: dict) -> str:
-        response = await self._client.messages.create(
+        # Plain dicts here don't structurally match the SDK's strict
+        # MessageParam/OutputConfigParam TypedDicts closely enough for mypy's
+        # overload resolution — tests/test_llm_providers.py exercises the
+        # actual request shape against a mocked endpoint instead.
+        response = await self._client.messages.create(  # type: ignore[call-overload]
             model=self._model,
             max_tokens=1024,
             system=system,
@@ -103,7 +107,9 @@ class ClaudeProvider:
             raise LLMDecisionError(f"Claude returned an invalid ExtractedReceipt: {exc}") from exc
         logger.info(
             "Claude.extract_receipt: readable=%s confidence=%.2f total=%s",
-            receipt.readable, receipt.confidence, receipt.total_amount,
+            receipt.readable,
+            receipt.confidence,
+            receipt.total_amount,
         )
         return receipt
 
@@ -118,6 +124,8 @@ class ClaudeProvider:
             raise LLMDecisionError(f"Claude returned an invalid QueryIntent: {exc}") from exc
         logger.info(
             "Claude.interpret_query: aggregation=%s category=%r date_range=%s",
-            intent.aggregation, intent.category, intent.date_range,
+            intent.aggregation,
+            intent.category,
+            intent.date_range,
         )
         return intent

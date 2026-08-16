@@ -71,9 +71,7 @@ class Expense(Base):
     """The actual ledger."""
 
     __tablename__ = "expenses"
-    __table_args__ = (
-        Index("ix_expenses_user_date_amount", "user_id", "txn_date", "amount"),
-    )
+    __table_args__ = (Index("ix_expenses_user_date_amount", "user_id", "txn_date", "amount"),)
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id"), nullable=False)
@@ -133,9 +131,7 @@ class BudgetAlertSent(Base):
     enforces "at most one alert per category per calendar month" directly."""
 
     __tablename__ = "budget_alerts_sent"
-    __table_args__ = (
-        Index("ix_budget_alerts_sent_user_category_month", "user_id", "category", "month", unique=True),
-    )
+    __table_args__ = (Index("ix_budget_alerts_sent_user_category_month", "user_id", "category", "month", unique=True),)
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id"), nullable=False)

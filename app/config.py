@@ -19,7 +19,18 @@ class Settings(BaseSettings):
     telegram_bot_token: str = Field(..., description="BotFather token")
     telegram_webhook_secret: str | None = Field(
         default=None,
-        description="Shared secret Telegram sends back on X-Telegram-Bot-Api-Secret-Token",
+        description=(
+            "Shared secret Telegram sends back on X-Telegram-Bot-Api-Secret-Token. "
+            "The webhook rejects every request while this is unset — there is no "
+            "'unauthenticated allowed' mode."
+        ),
+    )
+    cron_secret: str | None = Field(
+        default=None,
+        description=(
+            "Shared secret cron callers must send as X-Cron-Secret. /reconcile and "
+            "/check-budgets reject every request while this is unset."
+        ),
     )
 
     # --- LLM provider -----------------------------------------------------

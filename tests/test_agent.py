@@ -41,8 +41,14 @@ async def _make_user(session) -> User:
 
 
 async def _make_transaction(
-    session, user: User, *, amount: str, merchant: str, txn_date: date,
-    source: str = "sms", category_hint: str | None = None,
+    session,
+    user: User,
+    *,
+    amount: str,
+    merchant: str,
+    txn_date: date,
+    source: str = "sms",
+    category_hint: str | None = None,
 ) -> Transaction:
     txn = Transaction(
         user_id=user.id,
@@ -71,12 +77,8 @@ async def _make_expense(session, user: User, *, amount: str, category: str, txn_
 
 async def test_auto_link_links_expense_and_marks_transaction_processed(db_session):
     user = await _make_user(db_session)
-    expense = await _make_expense(
-        db_session, user, amount="450.00", category="Food", txn_date=date(2026, 8, 10)
-    )
-    txn = await _make_transaction(
-        db_session, user, amount="450.00", merchant="Blinkit", txn_date=date(2026, 8, 10)
-    )
+    expense = await _make_expense(db_session, user, amount="450.00", category="Food", txn_date=date(2026, 8, 10))
+    txn = await _make_transaction(db_session, user, amount="450.00", merchant="Blinkit", txn_date=date(2026, 8, 10))
 
     provider = _ScriptedProvider(
         [
@@ -111,9 +113,7 @@ async def test_auto_link_links_expense_and_marks_transaction_processed(db_sessio
 
 async def test_auto_log_creates_new_expense(db_session):
     user = await _make_user(db_session)
-    txn = await _make_transaction(
-        db_session, user, amount="220.00", merchant="Zomato", txn_date=date(2026, 8, 12)
-    )
+    txn = await _make_transaction(db_session, user, amount="220.00", merchant="Zomato", txn_date=date(2026, 8, 12))
 
     provider = _ScriptedProvider(
         [
@@ -145,9 +145,7 @@ async def test_auto_log_with_no_category_and_no_hint_asks_instead_of_uncategoriz
     category outside the fixed list, so a missing suggested_category now
     asks rather than silently logging something /budgets can never match."""
     user = await _make_user(db_session)
-    await _make_transaction(
-        db_session, user, amount="50.00", merchant="Unknown Shop", txn_date=date(2026, 8, 12)
-    )
+    await _make_transaction(db_session, user, amount="50.00", merchant="Unknown Shop", txn_date=date(2026, 8, 12))
 
     provider = _ScriptedProvider(
         [
@@ -172,9 +170,7 @@ async def test_auto_log_with_no_category_and_no_hint_asks_instead_of_uncategoriz
 
 async def test_ask_user_leaves_transaction_pending_and_opens_run(db_session):
     user = await _make_user(db_session)
-    txn = await _make_transaction(
-        db_session, user, amount="999.00", merchant="???", txn_date=date(2026, 8, 12)
-    )
+    txn = await _make_transaction(db_session, user, amount="999.00", merchant="???", txn_date=date(2026, 8, 12))
 
     provider = _ScriptedProvider(
         [
@@ -207,12 +203,8 @@ async def test_ask_user_leaves_transaction_pending_and_opens_run(db_session):
 
 async def test_low_confidence_auto_link_is_downgraded_to_ask_user(db_session):
     user = await _make_user(db_session)
-    expense = await _make_expense(
-        db_session, user, amount="450.00", category="Food", txn_date=date(2026, 8, 10)
-    )
-    await _make_transaction(
-        db_session, user, amount="450.00", merchant="Blinkit", txn_date=date(2026, 8, 10)
-    )
+    expense = await _make_expense(db_session, user, amount="450.00", category="Food", txn_date=date(2026, 8, 10))
+    await _make_transaction(db_session, user, amount="450.00", merchant="Blinkit", txn_date=date(2026, 8, 10))
 
     provider = _ScriptedProvider(
         [
@@ -245,9 +237,7 @@ async def test_low_confidence_auto_link_is_downgraded_to_ask_user(db_session):
 async def test_hallucinated_matched_expense_id_is_downgraded_to_ask_user(db_session):
     user = await _make_user(db_session)
     await _make_expense(db_session, user, amount="450.00", category="Food", txn_date=date(2026, 8, 10))
-    await _make_transaction(
-        db_session, user, amount="450.00", merchant="Blinkit", txn_date=date(2026, 8, 10)
-    )
+    await _make_transaction(db_session, user, amount="450.00", merchant="Blinkit", txn_date=date(2026, 8, 10))
 
     fake_id = uuid.uuid4()  # not among the candidates offered
     provider = _ScriptedProvider(
@@ -277,15 +267,22 @@ async def test_hallucinated_matched_expense_id_is_downgraded_to_ask_user(db_sess
 async def test_photo_auto_log_with_no_category_hint_is_downgraded_to_ask_user(db_session):
     user = await _make_user(db_session)
     await _make_transaction(
-        db_session, user, amount="150.00", merchant="Surendra Kumar Kachurimal",
-        txn_date=date(2026, 8, 9), source="photo",  # no category_hint — no caption was given
+        db_session,
+        user,
+        amount="150.00",
+        merchant="Surendra Kumar Kachurimal",
+        txn_date=date(2026, 8, 9),
+        source="photo",  # no category_hint — no caption was given
     )
 
     provider = _ScriptedProvider(
         [
             MatchDecision(
-                action="auto_log", matched_expense_id=None, suggested_category="Other",
-                confidence=0.9, reasoning="Clear amount, unclear category.",
+                action="auto_log",
+                matched_expense_id=None,
+                suggested_category="Other",
+                confidence=0.9,
+                reasoning="Clear amount, unclear category.",
             )
         ]
     )
@@ -305,14 +302,22 @@ async def test_sms_auto_log_with_a_known_category_is_unaffected(db_session):
     exactly as before — the new guards only fire on genuine ambiguity."""
     user = await _make_user(db_session)
     await _make_transaction(
-        db_session, user, amount="220.00", merchant="Zomato", txn_date=date(2026, 8, 12), source="sms",
+        db_session,
+        user,
+        amount="220.00",
+        merchant="Zomato",
+        txn_date=date(2026, 8, 12),
+        source="sms",
     )
 
     provider = _ScriptedProvider(
         [
             MatchDecision(
-                action="auto_log", matched_expense_id=None, suggested_category="Food",
-                confidence=0.9, reasoning="Clear food-delivery spend.",
+                action="auto_log",
+                matched_expense_id=None,
+                suggested_category="Food",
+                confidence=0.9,
+                reasoning="Clear food-delivery spend.",
             )
         ]
     )
@@ -330,15 +335,22 @@ async def test_sms_auto_log_with_unrecognized_category_is_downgraded_to_ask_user
     user's Food budget."""
     user = await _make_user(db_session)
     await _make_transaction(
-        db_session, user, amount="900.00", merchant="MUTHU SUPER MARKET", txn_date=date(2026, 8, 10),
+        db_session,
+        user,
+        amount="900.00",
+        merchant="MUTHU SUPER MARKET",
+        txn_date=date(2026, 8, 10),
         source="sms",
     )
 
     provider = _ScriptedProvider(
         [
             MatchDecision(
-                action="auto_log", matched_expense_id=None, suggested_category="Groceries",
-                confidence=0.9, reasoning="Clear supermarket purchase.",
+                action="auto_log",
+                matched_expense_id=None,
+                suggested_category="Groceries",
+                confidence=0.9,
+                reasoning="Clear supermarket purchase.",
             )
         ]
     )
@@ -358,14 +370,22 @@ async def test_sms_auto_log_category_casing_is_normalized(db_session):
     /setbudget and the ask_user buttons."""
     user = await _make_user(db_session)
     await _make_transaction(
-        db_session, user, amount="220.00", merchant="Zomato", txn_date=date(2026, 8, 12), source="sms",
+        db_session,
+        user,
+        amount="220.00",
+        merchant="Zomato",
+        txn_date=date(2026, 8, 12),
+        source="sms",
     )
 
     provider = _ScriptedProvider(
         [
             MatchDecision(
-                action="auto_log", matched_expense_id=None, suggested_category="food",  # lowercase
-                confidence=0.9, reasoning="Clear food-delivery spend.",
+                action="auto_log",
+                matched_expense_id=None,
+                suggested_category="food",  # lowercase
+                confidence=0.9,
+                reasoning="Clear food-delivery spend.",
             )
         ]
     )
@@ -385,15 +405,23 @@ async def test_photo_category_hint_overrides_suggested_category(db_session):
     a different category, the hint wins."""
     user = await _make_user(db_session)
     await _make_transaction(
-        db_session, user, amount="450.00", merchant="Reliance Fresh", txn_date=date(2026, 8, 14),
-        source="photo", category_hint="Food",
+        db_session,
+        user,
+        amount="450.00",
+        merchant="Reliance Fresh",
+        txn_date=date(2026, 8, 14),
+        source="photo",
+        category_hint="Food",
     )
 
     provider = _ScriptedProvider(
         [
             MatchDecision(
-                action="auto_log", matched_expense_id=None, suggested_category="Shopping",
-                confidence=0.9, reasoning="Looks like a retail purchase.",
+                action="auto_log",
+                matched_expense_id=None,
+                suggested_category="Shopping",
+                confidence=0.9,
+                reasoning="Looks like a retail purchase.",
             )
         ]
     )
@@ -444,9 +472,7 @@ async def test_llm_error_on_one_transaction_does_not_abort_the_batch(db_session)
 
 async def test_already_linked_expense_is_not_offered_as_a_candidate(db_session):
     user = await _make_user(db_session)
-    expense = await _make_expense(
-        db_session, user, amount="450.00", category="Food", txn_date=date(2026, 8, 10)
-    )
+    expense = await _make_expense(db_session, user, amount="450.00", category="Food", txn_date=date(2026, 8, 10))
     other_txn = await _make_transaction(
         db_session, user, amount="450.00", merchant="Blinkit", txn_date=date(2026, 8, 10)
     )
@@ -454,9 +480,7 @@ async def test_already_linked_expense_is_not_offered_as_a_candidate(db_session):
     expense.linked_transaction_id = other_txn.id
     await db_session.commit()
 
-    await _make_transaction(
-        db_session, user, amount="451.00", merchant="Blinkit", txn_date=date(2026, 8, 10)
-    )
+    await _make_transaction(db_session, user, amount="451.00", merchant="Blinkit", txn_date=date(2026, 8, 10))
 
     provider = _ScriptedProvider(
         [
@@ -487,9 +511,15 @@ async def test_summary_message_matches_brief_format(db_session):
 
     provider = _ScriptedProvider(
         [
-            MatchDecision(action="auto_log", matched_expense_id=None, suggested_category="Other", confidence=0.9, reasoning="x"),
-            MatchDecision(action="auto_log", matched_expense_id=None, suggested_category="Other", confidence=0.9, reasoning="x"),
-            MatchDecision(action="ask_user", matched_expense_id=None, suggested_category=None, confidence=0.4, reasoning="x"),
+            MatchDecision(
+                action="auto_log", matched_expense_id=None, suggested_category="Other", confidence=0.9, reasoning="x"
+            ),
+            MatchDecision(
+                action="auto_log", matched_expense_id=None, suggested_category="Other", confidence=0.9, reasoning="x"
+            ),
+            MatchDecision(
+                action="ask_user", matched_expense_id=None, suggested_category=None, confidence=0.4, reasoning="x"
+            ),
         ]
     )
 

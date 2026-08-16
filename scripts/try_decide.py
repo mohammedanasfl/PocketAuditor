@@ -48,9 +48,7 @@ async def _run(label: str, provider) -> None:
 
 async def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--both", action="store_true", help="run both Ollama and Claude side by side"
-    )
+    parser.add_argument("--both", action="store_true", help="run both Ollama and Claude side by side")
     args = parser.parse_args()
 
     if args.both:

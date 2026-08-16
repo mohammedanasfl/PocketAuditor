@@ -168,13 +168,21 @@ curl "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook" \
 
 Set the same `TELEGRAM_WEBHOOK_SECRET` value in `.env` — the webhook route
 checks it against the `X-Telegram-Bot-Api-Secret-Token` header Telegram sends
-back, rejecting anything else with 401.
+back, rejecting anything else with 401. This check fails *closed*: if
+`TELEGRAM_WEBHOOK_SECRET` isn't set, the route rejects every request,
+including real Telegram updates, rather than accepting unauthenticated ones.
 
 For local webhook testing without deploying, tunnel with `ngrok http "$PORT"`
 (matching whatever `PORT` you set in `.env`) and `setWebhook` against the
 ngrok URL instead.
 
 ### Weekly cron (GitHub Actions)
+
+`/reconcile` and `/check-budgets` both require an `X-Cron-Secret` header
+matching `CRON_SECRET` in `.env` — like the webhook secret, this fails
+*closed*: leaving `CRON_SECRET` unset rejects every caller with 401 rather
+than letting anyone who finds `APP_URL` trigger an LLM run for every user in
+the database. Add `CRON_SECRET` as a repo secret alongside `APP_URL`.
 
 ```yaml
 # .github/workflows/reconcile.yml
@@ -188,7 +196,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Trigger reconciliation
-        run: curl -X POST "${{ secrets.APP_URL }}/reconcile" -f
+        run: |
+          curl -X POST "${{ secrets.APP_URL }}/reconcile" \
+            -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" -f
 ```
 
 `POST /reconcile` returns `202` immediately (it schedules the actual loop as
@@ -216,7 +226,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Trigger budget check
-        run: curl -X POST "${{ secrets.APP_URL }}/check-budgets" -f
+        run: |
+          curl -X POST "${{ secrets.APP_URL }}/check-budgets" \
+            -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" -f
 ```
 
 Same `202`-and-background-task shape as `/reconcile`: it loops over every

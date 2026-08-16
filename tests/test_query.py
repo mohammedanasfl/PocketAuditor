@@ -36,7 +36,9 @@ async def _make_user(session) -> User:
     return user
 
 
-async def _make_expense(session, user: User, *, amount: str, category: str, txn_date: date, merchant: str | None = None) -> Expense:
+async def _make_expense(
+    session, user: User, *, amount: str, category: str, txn_date: date, merchant: str | None = None
+) -> Expense:
     expense = Expense(user_id=user.id, amount=Decimal(amount), category=category, merchant=merchant, txn_date=txn_date)
     session.add(expense)
     await session.commit()
@@ -126,8 +128,12 @@ async def test_run_query_count_aggregation(db_session):
 
 async def test_run_query_max_aggregation(db_session):
     user = await _make_user(db_session)
-    await _make_expense(db_session, user, amount="50.00", category="Food", txn_date=date(2026, 8, 11), merchant="Zomato")
-    await _make_expense(db_session, user, amount="450.00", category="Food", txn_date=date(2026, 8, 12), merchant="Blinkit")
+    await _make_expense(
+        db_session, user, amount="50.00", category="Food", txn_date=date(2026, 8, 11), merchant="Zomato"
+    )
+    await _make_expense(
+        db_session, user, amount="450.00", category="Food", txn_date=date(2026, 8, 12), merchant="Blinkit"
+    )
 
     intent = _intent(category="Food", date_range="this_week", aggregation="max")
     result = await run_query(db_session, user.id, intent, today=date(2026, 8, 15))

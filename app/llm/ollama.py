@@ -51,9 +51,7 @@ class OllamaProvider:
         self._base_url = (base_url or settings.ollama_base_url).rstrip("/")
         self._model = model or settings.llm_model
 
-    async def _chat_json(
-        self, system: str, user: str, schema: dict, images: list[str] | None = None
-    ) -> str:
+    async def _chat_json(self, system: str, user: str, schema: dict, images: list[str] | None = None) -> str:
         user_message: dict = {"role": "user", "content": user}
         if images is not None:
             user_message["images"] = images
@@ -93,7 +91,9 @@ class OllamaProvider:
                 return decision
             except (ValidationError, json.JSONDecodeError) as exc:
                 last_error = exc
-                logger.warning("Ollama.decide_match: invalid response on attempt %d/%d: %s", attempt, _MAX_ATTEMPTS, exc)
+                logger.warning(
+                    "Ollama.decide_match: invalid response on attempt %d/%d: %s", attempt, _MAX_ATTEMPTS, exc
+                )
                 payload = (
                     f"{payload}\n\n(Your previous response was invalid: {exc}. "
                     "Return exactly one JSON object matching the schema.)"
@@ -134,7 +134,9 @@ class OllamaProvider:
                 receipt = ExtractedReceipt.model_validate_json(content)
                 logger.info(
                     "Ollama.extract_receipt: readable=%s confidence=%.2f total=%s",
-                    receipt.readable, receipt.confidence, receipt.total_amount,
+                    receipt.readable,
+                    receipt.confidence,
+                    receipt.total_amount,
                 )
                 return receipt
             except (ValidationError, json.JSONDecodeError) as exc:
@@ -159,7 +161,9 @@ class OllamaProvider:
                 intent = QueryIntent.model_validate_json(content)
                 logger.info(
                     "Ollama.interpret_query: aggregation=%s category=%r date_range=%s",
-                    intent.aggregation, intent.category, intent.date_range,
+                    intent.aggregation,
+                    intent.category,
+                    intent.date_range,
                 )
                 return intent
             except (ValidationError, json.JSONDecodeError) as exc:

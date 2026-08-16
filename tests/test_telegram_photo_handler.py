@@ -16,7 +16,7 @@ from types import SimpleNamespace
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-import app.telegram.handlers as handlers_module
+import app.telegram.handlers.messages as handlers_module
 from app.db import Base
 from app.llm.base import LLMDecisionError
 from app.models import Transaction
@@ -52,9 +52,7 @@ def _make_update(caption: str | None = None):
     async def reply_text(text: str) -> None:
         replies.append(text)
 
-    message = SimpleNamespace(
-        photo=[SimpleNamespace(file_id="abc123")], caption=caption, reply_text=reply_text
-    )
+    message = SimpleNamespace(photo=[SimpleNamespace(file_id="abc123")], caption=caption, reply_text=reply_text)
     update = SimpleNamespace(message=message, effective_chat=SimpleNamespace(id=555))
     return update, replies
 
@@ -106,8 +104,12 @@ async def test_photo_caption_sets_category_hint(tmp_path, monkeypatch):
     session_factory, engine = await _sqlite_session_factory(tmp_path, monkeypatch)
     update, replies = _make_update(caption="Food")
     receipt = ExtractedReceipt(
-        merchant="Reliance Fresh", total_amount=450.0, txn_date=date(2026, 8, 14),
-        line_items=None, confidence=0.9, readable=True,
+        merchant="Reliance Fresh",
+        total_amount=450.0,
+        txn_date=date(2026, 8, 14),
+        line_items=None,
+        confidence=0.9,
+        readable=True,
     )
     context = SimpleNamespace(bot_data={"llm_provider": _FakeProvider(receipt=receipt)}, bot=_FakeBot())
 
@@ -123,8 +125,12 @@ async def test_photo_caption_is_case_insensitive_against_known_categories(tmp_pa
     session_factory, engine = await _sqlite_session_factory(tmp_path, monkeypatch)
     update, replies = _make_update(caption="food")  # lowercase
     receipt = ExtractedReceipt(
-        merchant="Reliance Fresh", total_amount=450.0, txn_date=date(2026, 8, 14),
-        line_items=None, confidence=0.9, readable=True,
+        merchant="Reliance Fresh",
+        total_amount=450.0,
+        txn_date=date(2026, 8, 14),
+        line_items=None,
+        confidence=0.9,
+        readable=True,
     )
     context = SimpleNamespace(bot_data={"llm_provider": _FakeProvider(receipt=receipt)}, bot=_FakeBot())
 
@@ -139,8 +145,12 @@ async def test_photo_unrecognized_caption_leaves_category_hint_null(tmp_path, mo
     session_factory, engine = await _sqlite_session_factory(tmp_path, monkeypatch)
     update, replies = _make_update(caption="lunch with friends")  # not one of CATEGORIES
     receipt = ExtractedReceipt(
-        merchant="Reliance Fresh", total_amount=450.0, txn_date=date(2026, 8, 14),
-        line_items=None, confidence=0.9, readable=True,
+        merchant="Reliance Fresh",
+        total_amount=450.0,
+        txn_date=date(2026, 8, 14),
+        line_items=None,
+        confidence=0.9,
+        readable=True,
     )
     context = SimpleNamespace(bot_data={"llm_provider": _FakeProvider(receipt=receipt)}, bot=_FakeBot())
 
@@ -156,8 +166,12 @@ async def test_photo_with_no_caption_leaves_category_hint_null(tmp_path, monkeyp
     session_factory, engine = await _sqlite_session_factory(tmp_path, monkeypatch)
     update, replies = _make_update()  # no caption
     receipt = ExtractedReceipt(
-        merchant="Reliance Fresh", total_amount=450.0, txn_date=date(2026, 8, 14),
-        line_items=None, confidence=0.9, readable=True,
+        merchant="Reliance Fresh",
+        total_amount=450.0,
+        txn_date=date(2026, 8, 14),
+        line_items=None,
+        confidence=0.9,
+        readable=True,
     )
     context = SimpleNamespace(bot_data={"llm_provider": _FakeProvider(receipt=receipt)}, bot=_FakeBot())
 
@@ -191,8 +205,12 @@ async def test_low_confidence_receipt_creates_no_transaction_even_if_readable(tm
     session_factory, engine = await _sqlite_session_factory(tmp_path, monkeypatch)
     update, replies = _make_update()
     receipt = ExtractedReceipt(
-        merchant="Some Shop", total_amount=100.0, txn_date=date(2026, 8, 14),
-        line_items=None, confidence=0.5, readable=True,
+        merchant="Some Shop",
+        total_amount=100.0,
+        txn_date=date(2026, 8, 14),
+        line_items=None,
+        confidence=0.5,
+        readable=True,
     )
     context = SimpleNamespace(bot_data={"llm_provider": _FakeProvider(receipt=receipt)}, bot=_FakeBot())
 

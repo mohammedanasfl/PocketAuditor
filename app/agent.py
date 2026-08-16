@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
@@ -209,10 +209,14 @@ def _normalize_auto_log_category(decision: MatchDecision) -> MatchDecision:
 async def _act(
     session: AsyncSession, user_id: UUID, txn: Transaction, decision: MatchDecision
 ) -> PendingQuestion | None:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     if decision.action == "auto_link":
         expense = await session.get(Expense, decision.matched_expense_id)
+        # _apply_guard already confirmed matched_expense_id was among the
+        # candidates queried from the DB moments ago, so it's guaranteed to
+        # still resolve here.
+        assert expense is not None
         expense.linked_transaction_id = txn.id
         txn.status = "processed"
         run_status = "resolved"
@@ -290,7 +294,10 @@ async def reconcile_user(session: AsyncSession, provider: LLMProvider, user_id: 
         pending = await _act(session, user_id, txn, decision)
         logger.info(
             "txn=%s: decision=%s confidence=%.2f candidates=%d",
-            txn.id, decision.action, decision.confidence, len(candidate_dicts),
+            txn.id,
+            decision.action,
+            decision.confidence,
+            len(candidate_dicts),
         )
 
         if decision.action == "auto_link":

@@ -12,9 +12,9 @@ from alembic import context
 # Make `app` importable when Alembic is invoked from the project root.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from app import models  # noqa: E402,F401  (import registers models on Base.metadata)
 from app.config import settings  # noqa: E402
 from app.db import Base  # noqa: E402
-from app import models  # noqa: E402,F401  (import registers models on Base.metadata)
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -79,11 +79,7 @@ async def run_async_migrations() -> None:
     # configured URL actually uses the asyncpg driver (e.g. not in tests, which
     # point this at sqlite+aiosqlite).
     url = config.get_main_option("sqlalchemy.url") or ""
-    connect_args = (
-        {"statement_cache_size": 0, "prepared_statement_cache_size": 0}
-        if "+asyncpg" in url
-        else {}
-    )
+    connect_args = {"statement_cache_size": 0, "prepared_statement_cache_size": 0} if "+asyncpg" in url else {}
 
     connectable = async_engine_from_config(
         config.get_section(config.config_ini_section, {}),

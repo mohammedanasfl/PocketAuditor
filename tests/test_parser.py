@@ -11,7 +11,7 @@ from decimal import Decimal
 import pytest
 
 from app.llm.base import LLMDecisionError
-from app.parser import ParseError, ParsedTransaction, parse_sms
+from app.parser import ParseError, parse_sms
 from app.schemas import LLMExtraction
 
 
@@ -64,8 +64,7 @@ CLEAN_FIXTURES = [
         True,
     ),
     (
-        "Your A/c XX9012 debited by Rs 799.00 on 12/08/26 and credited to SWIGGY. "
-        "Avl Bal Rs 5,432.10 -SBI",
+        "Your A/c XX9012 debited by Rs 799.00 on 12/08/26 and credited to SWIGGY. Avl Bal Rs 5,432.10 -SBI",
         Decimal("799.00"),
         "SWIGGY",
         date(2026, 8, 12),
@@ -111,10 +110,7 @@ async def test_clean_sms_resolved_by_regex_alone(text, amount, merchant, txn_dat
 
 
 async def test_credit_message_flagged_not_debit():
-    text = (
-        "INR 25,000.00 credited to your A/c XX1234 on 01-08-26 by NEFT from "
-        "EMPLOYER PVT LTD -HDFC Bank"
-    )
+    text = "INR 25,000.00 credited to your A/c XX1234 on 01-08-26 by NEFT from EMPLOYER PVT LTD -HDFC Bank"
     result = await parse_sms(text, provider=_NeverCalledProvider())
     assert result.is_debit is False
     assert result.amount == Decimal("25000.00")

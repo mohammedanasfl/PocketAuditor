@@ -13,7 +13,7 @@ from types import SimpleNamespace
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-import app.telegram.handlers as handlers_module
+import app.telegram.handlers.commands as handlers_module
 from app.db import Base
 from app.models import Expense
 from app.telegram.handlers import handle_log_command

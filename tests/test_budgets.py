@@ -11,7 +11,6 @@ from sqlalchemy import select
 
 from app.budgets import (
     BudgetAlert,
-    BudgetStatus,
     check_budget_alerts,
     format_budgets_message,
     get_budget_statuses,

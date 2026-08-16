@@ -45,7 +45,7 @@ async def _sum_since(session: AsyncSession, user_id: UUID, since: date | None) -
 
 
 async def get_spend_summary(session: AsyncSession, user_id: UUID) -> SpendSummary:
-    """"This week" is the current Monday-start week; "this month"/"this year"
+    """ "This week" is the current Monday-start week; "this month"/"this year"
     are the current calendar month/year — all relative to today."""
     today = date.today()
     week_start = today - timedelta(days=today.weekday())

@@ -68,16 +68,16 @@ class QueryResult:
 
         if self.intent.aggregation == "sum":
             txn_word = "transaction" if self.count == 1 else "transactions"
-            return (
-                f"You spent Rs.{self.total:,.2f}{category_phrase} {period_phrase} "
-                f"across {self.count} {txn_word}."
-            )
+            return f"You spent Rs.{self.total:,.2f}{category_phrase} {period_phrase} across {self.count} {txn_word}."
 
         if self.intent.aggregation == "count":
             txn_word = "transaction" if self.count == 1 else "transactions"
             return f"You made {self.count} {txn_word}{category_phrase} {period_phrase}."
 
         if self.intent.aggregation == "max":
+            # run_query only ever leaves max_item unset when count == 0, which
+            # the is_empty check above has already returned early for.
+            assert self.max_item is not None
             item = self.max_item
             merchant_phrase = f" at {item['merchant']}" if item["merchant"] else ""
             return (

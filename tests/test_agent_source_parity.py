@@ -51,7 +51,13 @@ async def _make_expense(session, user: User, *, amount: str, category: str, txn_
 
 
 async def _make_transaction(
-    session, user: User, *, amount: str, merchant: str, txn_date: date, source: str,
+    session,
+    user: User,
+    *,
+    amount: str,
+    merchant: str,
+    txn_date: date,
+    source: str,
     category_hint: str | None = None,
 ) -> Transaction:
     txn = Transaction(
@@ -73,14 +79,17 @@ async def _make_transaction(
 async def test_all_three_actions_and_the_guard_behave_identically_by_source(db_session, source):
     user = await _make_user(db_session)
 
-    linked_expense = await _make_expense(
-        db_session, user, amount="450.00", category="Food", txn_date=date(2026, 8, 10)
-    )
+    linked_expense = await _make_expense(db_session, user, amount="450.00", category="Food", txn_date=date(2026, 8, 10))
     link_txn = await _make_transaction(
         db_session, user, amount="450.00", merchant="Blinkit", txn_date=date(2026, 8, 10), source=source
     )
     log_txn = await _make_transaction(
-        db_session, user, amount="220.00", merchant="Zomato", txn_date=date(2026, 8, 12), source=source,
+        db_session,
+        user,
+        amount="220.00",
+        merchant="Zomato",
+        txn_date=date(2026, 8, 12),
+        source=source,
         category_hint="Food",  # present so photo's auto_log guard doesn't fire — see module docstring
     )
     ask_txn = await _make_transaction(
@@ -96,19 +105,30 @@ async def test_all_three_actions_and_the_guard_behave_identically_by_source(db_s
     provider = _ScriptedProvider(
         [
             MatchDecision(
-                action="auto_link", matched_expense_id=linked_expense.id, suggested_category=None,
-                confidence=0.95, reasoning="Amount and date match exactly.",
+                action="auto_link",
+                matched_expense_id=linked_expense.id,
+                suggested_category=None,
+                confidence=0.95,
+                reasoning="Amount and date match exactly.",
             ),
             MatchDecision(
-                action="auto_log", matched_expense_id=None, suggested_category="Food",
-                confidence=0.9, reasoning="Clear spend, no candidate.",
+                action="auto_log",
+                matched_expense_id=None,
+                suggested_category="Food",
+                confidence=0.9,
+                reasoning="Clear spend, no candidate.",
             ),
             MatchDecision(
-                action="ask_user", matched_expense_id=None, suggested_category=None,
-                confidence=0.4, reasoning="Merchant is unclear.",
+                action="ask_user",
+                matched_expense_id=None,
+                suggested_category=None,
+                confidence=0.4,
+                reasoning="Merchant is unclear.",
             ),
             MatchDecision(
-                action="auto_link", matched_expense_id=guard_expense.id, suggested_category=None,
+                action="auto_link",
+                matched_expense_id=guard_expense.id,
+                suggested_category=None,
                 confidence=0.5,  # below settings.confidence_threshold -> guard downgrades this
                 reasoning="Looks like a match.",
             ),
@@ -128,9 +148,7 @@ async def test_all_three_actions_and_the_guard_behave_identically_by_source(db_s
 
     await db_session.refresh(log_txn)
     assert log_txn.status == "processed"
-    logged_expense = (
-        await db_session.execute(select(Expense).where(Expense.created_via == "auto_log"))
-    ).scalar_one()
+    logged_expense = (await db_session.execute(select(Expense).where(Expense.created_via == "auto_log"))).scalar_one()
     assert logged_expense.category == "Food"
     assert logged_expense.linked_transaction_id == log_txn.id
 
@@ -143,9 +161,7 @@ async def test_all_three_actions_and_the_guard_behave_identically_by_source(db_s
     await db_session.refresh(guard_expense)
     assert guard_expense.linked_transaction_id is None  # guard fired before the link happened
 
-    runs = (
-        await db_session.execute(select(ReconciliationRun).order_by(ReconciliationRun.created_at))
-    ).scalars().all()
+    runs = (await db_session.execute(select(ReconciliationRun).order_by(ReconciliationRun.created_at))).scalars().all()
     assert [r.decision for r in runs] == ["auto_link", "auto_log", "ask_user", "ask_user"]
     assert "downgraded to ask_user" in runs[3].reasoning
 

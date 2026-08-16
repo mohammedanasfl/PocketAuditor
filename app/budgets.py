@@ -92,8 +92,10 @@ async def get_budget_statuses(session: AsyncSession, user_id: UUID, *, today: da
     month_start = today.replace(day=1)
 
     budgets = (
-        await session.execute(select(Budget).where(Budget.user_id == user_id).order_by(Budget.category))
-    ).scalars().all()
+        (await session.execute(select(Budget).where(Budget.user_id == user_id).order_by(Budget.category)))
+        .scalars()
+        .all()
+    )
     if not budgets:
         return []
 

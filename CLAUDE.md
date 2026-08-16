@@ -35,9 +35,41 @@ python -m scripts.try_decide           # uses LLM_PROVIDER from .env
 python -m scripts.try_decide --both    # Ollama + Claude side by side (needs ANTHROPIC_API_KEY)
 ```
 
-There is no linter/formatter configured in this repo.
+## Code standards
+
+Ruff (lint + format) and mypy are configured in `pyproject.toml`:
+
+```bash
+ruff check .          # lint
+ruff format .         # format (format --check in CI)
+mypy app              # type-check; scoped to app/ — alembic/scripts/tests are excluded
+```
+
+Both run as the `lint` job in CI, alongside the existing `test` job. `mypy`
+is `disallow_untyped_defs` on `app/` — third-party stubs that mark things
+Optional even though this app's own usage guarantees them non-None (e.g.
+python-telegram-bot's `Update.effective_chat`/`Application.updater`) get a
+narrow, commented override or `assert` rather than broadening the config;
+see `pyproject.toml`'s `app.telegram.handlers.*` override and the asserts in
+`app/agent.py`/`app/expenses.py`/`app/query.py`/`app/parser.py` for the
+pattern.
 
 ## Architecture
+
+### Routes vs. services
+
+FastAPI routing (`app/routes.py`) and Telegram routing
+(`app/telegram/handlers/`) are kept thin — they parse the incoming
+request/Update, delegate to a service module, and format the reply/response.
+Business logic lives in flat service modules alongside the pre-existing
+ones, all directly under `app/` (no `routes/`/`services/` subpackages — kept
+consistent with how `app/agent.py`/`app/budgets.py`/`app/query.py`/
+`app/reports.py`/`app/parser.py` already worked before this split):
+`app/cron.py` (the two all-users cron bodies), `app/expenses.py` (creating
+an `expenses` row directly — manual `/log`, or resolving an ask_user
+answer), `app/ingestion.py` (turning an SMS or receipt photo into a
+`transactions` row). `app/main.py` is just the FastAPI app factory +
+lifespan (Telegram `Application` startup/shutdown) + `include_router`.
 
 ### The provider boundary is load-bearing
 
@@ -89,9 +121,10 @@ in `app/reports.py` sums this, not `transactions`), `reconciliation_runs`
 and the Telegram callback handler find work without a fragile join:
 `auto_link`/`auto_log` immediately mark the transaction `processed` and the
 run `resolved`; `ask_user` leaves the transaction `pending` and the run
-`open` until `app/telegram/handlers.py:handle_category_callback` resolves it
-(creates the `expenses` row with `created_via='manual'`, flips both statuses,
-edits the Telegram message to drop the buttons).
+`open` until `app/telegram/handlers/callbacks.py:handle_category_callback`
+resolves it, via `app/expenses.py:resolve_ask_user_answer` (creates the
+`expenses` row with `created_via='manual'`, flips both statuses); the
+handler then edits the Telegram message to drop the buttons.
 
 ### SMS parsing: regex-first, direction-aware, LLM fallback for the residue
 
@@ -110,13 +143,31 @@ counterparty. Direction must therefore be parsed before merchant in
 
 ### Two independent /reconcile entry points
 
-`app/telegram/handlers.py:handle_reconcile_command` (the `/reconcile`
-Telegram command) reconciles only the requesting chat's user.
-`app/main.py:reconcile_endpoint` (`POST /reconcile`, for the external weekly
-cron) has no Telegram chat context, so `_run_reconcile_all_users` instead
-loops over *every* user in the DB, one DB session per user, and returns
-`202` immediately via `BackgroundTasks` — the actual loop (and each user's
-summary message) happens after the response is sent.
+`app/telegram/handlers/commands.py:handle_reconcile_command` (the
+`/reconcile` Telegram command) reconciles only the requesting chat's user.
+`app/routes.py:reconcile_endpoint` (`POST /reconcile`, for the external
+weekly cron) has no Telegram chat context, so it schedules
+`app/cron.py:reconcile_all_users` via `BackgroundTasks` instead, which loops
+over *every* user in the DB, one DB session per user, and returns `202`
+immediately — the actual loop (and each user's summary message) happens
+after the response is sent.
+
+### Every non-/health route fails closed on its shared secret
+
+`app/routes.py` gates `/telegram/webhook` on `settings.telegram_webhook_secret`
+(against `X-Telegram-Bot-Api-Secret-Token`) and `/reconcile`/`/check-budgets`
+on `settings.cron_secret` (against `X-Cron-Secret`, via the
+`_verify_cron_secret` dependency). Both checks are written as "reject unless
+the secret is set *and* matches" — never "only check if a secret happens to
+be configured". An unset secret must reject every caller, not admit them:
+the earlier version of the webhook check treated a missing
+`telegram_webhook_secret` as "no check needed", which meant forgetting to
+set it in production silently accepted forged Telegram updates rather than
+failing loudly. If you touch either check, preserve the fail-closed shape —
+"missing config" and "wrong secret" must be indistinguishable from the
+caller's side (both 401), and neither `/reconcile` nor `/check-budgets`
+should ever run without `CRON_SECRET` configured, since they trigger an LLM
+run for every user in the database.
 
 ### Logging requires explicit setup — this bit us once already
 

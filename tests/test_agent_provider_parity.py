@@ -74,9 +74,7 @@ async def test_agent_loop_produces_identical_writes_across_providers(tmp_path, m
     # --- Ollama run ---
     ollama_engine, ollama_session = await _fresh_session(tmp_path, "ollama")
     ollama_user = await _seed(ollama_session)
-    respx.post(OLLAMA_URL).mock(
-        return_value=Response(200, json={"message": {"content": decision_json}})
-    )
+    respx.post(OLLAMA_URL).mock(return_value=Response(200, json={"message": {"content": decision_json}}))
     ollama_provider = OllamaProvider(base_url="http://localhost:11434", model="qwen2.5:7b")
     ollama_summary = await reconcile_user(ollama_session, ollama_provider, ollama_user.id)
 

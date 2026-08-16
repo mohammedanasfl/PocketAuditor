@@ -55,6 +55,8 @@ class GeminiProvider:
                 automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
             ),
         )
+        if response.text is None:
+            raise LLMDecisionError("Gemini returned no text content (likely blocked or truncated)")
         return response.text
 
     async def decide_match(self, transaction: dict, candidates: list[dict]) -> MatchDecision:
@@ -98,7 +100,9 @@ class GeminiProvider:
             raise LLMDecisionError(f"Gemini returned an invalid ExtractedReceipt: {exc}") from exc
         logger.info(
             "Gemini.extract_receipt: readable=%s confidence=%.2f total=%s",
-            receipt.readable, receipt.confidence, receipt.total_amount,
+            receipt.readable,
+            receipt.confidence,
+            receipt.total_amount,
         )
         return receipt
 
@@ -113,6 +117,8 @@ class GeminiProvider:
             raise LLMDecisionError(f"Gemini returned an invalid QueryIntent: {exc}") from exc
         logger.info(
             "Gemini.interpret_query: aggregation=%s category=%r date_range=%s",
-            intent.aggregation, intent.category, intent.date_range,
+            intent.aggregation,
+            intent.category,
+            intent.date_range,
         )
         return intent

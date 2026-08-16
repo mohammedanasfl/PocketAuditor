@@ -32,14 +32,22 @@ _AMOUNT_RE = re.compile(
     r"(?:INR|Rs\.?|₹)\s*([\d,]+(?:\.\d{1,2})?)|\b([\d,]+(?:\.\d{1,2})?)\s*(?:INR|Rs\.?|₹)\b",
     re.IGNORECASE,
 )
-_DEBIT_RE = re.compile(
-    r"\b(?:debited|debit|spent|paid|withdrawn|purchase|sent|transferred)\b", re.IGNORECASE
-)
+_DEBIT_RE = re.compile(r"\b(?:debited|debit|spent|paid|withdrawn|purchase|sent|transferred)\b", re.IGNORECASE)
 _CREDIT_RE = re.compile(r"\b(?:credited|credit|received|refunded|deposited)\b", re.IGNORECASE)
 
 _MONTHS = {
-    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
-    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+    "jan": 1,
+    "feb": 2,
+    "mar": 3,
+    "apr": 4,
+    "may": 5,
+    "jun": 6,
+    "jul": 7,
+    "aug": 8,
+    "sep": 9,
+    "oct": 10,
+    "nov": 11,
+    "dec": 12,
 }
 _DATE_NUMERIC_RE = re.compile(r"\b(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})\b")
 _DATE_MON_RE = re.compile(
@@ -142,17 +150,17 @@ def _parse_merchant(text: str, is_debit: bool | None) -> str | None:
     """Try the preposition that names the counterparty for this direction
     first, falling back to the other if that phrasing isn't present."""
     if is_debit is False:
-        return _first_merchant_match(_MERCHANT_FROM_RE, text) or _first_merchant_match(
-            _MERCHANT_TO_RE, text
-        )
-    return _first_merchant_match(_MERCHANT_TO_RE, text) or _first_merchant_match(
-        _MERCHANT_FROM_RE, text
-    )
+        return _first_merchant_match(_MERCHANT_FROM_RE, text) or _first_merchant_match(_MERCHANT_TO_RE, text)
+    return _first_merchant_match(_MERCHANT_TO_RE, text) or _first_merchant_match(_MERCHANT_FROM_RE, text)
 
 
 def _regex_result(
-    *, amount: Decimal, merchant: str | None, txn_date: date | None,
-    is_debit: bool | None, confidence: float,
+    *,
+    amount: Decimal,
+    merchant: str | None,
+    txn_date: date | None,
+    is_debit: bool | None,
+    confidence: float,
 ) -> ParsedTransaction:
     return ParsedTransaction(
         amount=amount,
@@ -188,18 +196,27 @@ async def parse_sms(raw_text: str, provider: LLMProvider) -> ParsedTransaction:
     # since date+merchant alone cap out at 0.5 — so amount is guaranteed set
     # here.
     if confidence >= _LLM_FALLBACK_THRESHOLD:
+        assert amount is not None
         logger.info(
             "parsed via regex (confidence=%.2f): amount=%s merchant=%r txn_date=%s is_debit=%s",
-            confidence, amount, merchant, txn_date, is_debit,
+            confidence,
+            amount,
+            merchant,
+            txn_date,
+            is_debit,
         )
         return _regex_result(
-            amount=amount, merchant=merchant, txn_date=txn_date,
-            is_debit=is_debit, confidence=confidence,
+            amount=amount,
+            merchant=merchant,
+            txn_date=txn_date,
+            is_debit=is_debit,
+            confidence=confidence,
         )
 
     logger.info(
         "regex confidence %.2f below %.2f threshold — falling back to LLM",
-        confidence, _LLM_FALLBACK_THRESHOLD,
+        confidence,
+        _LLM_FALLBACK_THRESHOLD,
     )
     try:
         extraction = await provider.parse_transaction(raw_text)
@@ -209,12 +226,13 @@ async def parse_sms(raw_text: str, provider: LLMProvider) -> ParsedTransaction:
             # low (e.g. missing date/merchant); better to log an
             # approximate expense than drop it because the LLM fallback
             # itself failed.
-            logger.warning(
-                "LLM fallback failed (%s) — using regex result anyway (confidence=%.2f)", exc, confidence
-            )
+            logger.warning("LLM fallback failed (%s) — using regex result anyway (confidence=%.2f)", exc, confidence)
             return _regex_result(
-                amount=amount, merchant=merchant, txn_date=txn_date,
-                is_debit=is_debit, confidence=confidence,
+                amount=amount,
+                merchant=merchant,
+                txn_date=txn_date,
+                is_debit=is_debit,
+                confidence=confidence,
             )
         logger.warning("could not extract a transaction from this message: %s", exc)
         raise ParseError(f"Could not extract a transaction from this message: {exc}") from exc
@@ -228,7 +246,10 @@ async def parse_sms(raw_text: str, provider: LLMProvider) -> ParsedTransaction:
 
     logger.info(
         "parsed via llm: amount=%s merchant=%r txn_date=%s is_debit=%s",
-        extraction.amount, extraction.merchant, extraction.txn_date, extraction.is_debit,
+        extraction.amount,
+        extraction.merchant,
+        extraction.txn_date,
+        extraction.is_debit,
     )
     return ParsedTransaction(
         amount=Decimal(str(extraction.amount)).quantize(Decimal("0.01")),

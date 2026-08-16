@@ -25,9 +25,7 @@ OLLAMA_URL = "http://localhost:11434/api/chat"
 
 TRANSACTION = {"amount": "450.00", "merchant": "Blinkit", "txn_date": "2026-08-10"}
 CANDIDATE_ID = str(uuid.uuid4())
-CANDIDATES = [
-    {"id": CANDIDATE_ID, "amount": "450.00", "merchant": "Blinkit", "txn_date": "2026-08-10"}
-]
+CANDIDATES = [{"id": CANDIDATE_ID, "amount": "450.00", "merchant": "Blinkit", "txn_date": "2026-08-10"}]
 
 # Stand-in bytes for a photo — extract_receipt tests mock the API response
 # directly (same pattern as decide_match/parse_transaction above), so these
@@ -63,9 +61,7 @@ def _extraction_json() -> str:
     )
 
 
-def _receipt_json(
-    *, readable: bool, merchant: str | None = None, total_amount: float | None = None
-) -> str:
+def _receipt_json(*, readable: bool, merchant: str | None = None, total_amount: float | None = None) -> str:
     return json.dumps(
         {
             "merchant": merchant,
@@ -79,7 +75,10 @@ def _receipt_json(
 
 
 def _query_intent_json(
-    *, category: str | None = "Food", date_range: str = "this_week", aggregation: str = "sum",
+    *,
+    category: str | None = "Food",
+    date_range: str = "this_week",
+    aggregation: str = "sum",
     is_expense_question: bool = True,
 ) -> str:
     return json.dumps(
@@ -131,9 +130,7 @@ def test_sanitize_schema_strips_unsupported_keys_but_keeps_contract():
 
 @respx.mock
 async def test_ollama_decide_match_valid_response():
-    respx.post(OLLAMA_URL).mock(
-        return_value=Response(200, json={"message": {"content": _decision_json(CANDIDATE_ID)}})
-    )
+    respx.post(OLLAMA_URL).mock(return_value=Response(200, json={"message": {"content": _decision_json(CANDIDATE_ID)}}))
     provider = OllamaProvider(base_url="http://localhost:11434", model="qwen2.5:7b")
     decision = await provider.decide_match(TRANSACTION, CANDIDATES)
     assert decision.action == "auto_link"
@@ -157,9 +154,7 @@ async def test_ollama_decide_match_retries_then_succeeds():
 
 @respx.mock
 async def test_ollama_decide_match_raises_after_exhausting_retries():
-    route = respx.post(OLLAMA_URL).mock(
-        return_value=Response(200, json={"message": {"content": "not valid json"}})
-    )
+    route = respx.post(OLLAMA_URL).mock(return_value=Response(200, json={"message": {"content": "not valid json"}}))
     provider = OllamaProvider(base_url="http://localhost:11434", model="qwen2.5:7b")
     with pytest.raises(LLMDecisionError):
         await provider.decide_match(TRANSACTION, CANDIDATES)
@@ -168,13 +163,9 @@ async def test_ollama_decide_match_raises_after_exhausting_retries():
 
 @respx.mock
 async def test_ollama_parse_transaction_valid_response():
-    respx.post(OLLAMA_URL).mock(
-        return_value=Response(200, json={"message": {"content": _extraction_json()}})
-    )
+    respx.post(OLLAMA_URL).mock(return_value=Response(200, json={"message": {"content": _extraction_json()}}))
     provider = OllamaProvider(base_url="http://localhost:11434", model="qwen2.5:7b")
-    extraction = await provider.parse_transaction(
-        "Rs.450 debited from A/c XX1234 at BLINKIT on 10-08-26"
-    )
+    extraction = await provider.parse_transaction("Rs.450 debited from A/c XX1234 at BLINKIT on 10-08-26")
     assert extraction.amount == 450.0
     assert extraction.merchant == "Blinkit"
     assert extraction.is_debit is True
@@ -221,9 +212,7 @@ async def test_ollama_extract_receipt_blurry_image_returns_unreadable():
 
 @respx.mock
 async def test_ollama_extract_receipt_raises_after_exhausting_retries():
-    route = respx.post(OLLAMA_URL).mock(
-        return_value=Response(200, json={"message": {"content": "not valid json"}})
-    )
+    route = respx.post(OLLAMA_URL).mock(return_value=Response(200, json={"message": {"content": "not valid json"}}))
     provider = OllamaProvider(base_url="http://localhost:11434", model="qwen2.5vl:7b")
     with pytest.raises(LLMDecisionError):
         await provider.extract_receipt(FAKE_IMAGE_BYTES, "image/jpeg")
@@ -244,9 +233,7 @@ async def test_ollama_http_error_is_wrapped_as_llm_decision_error_not_leaked():
 
 @respx.mock
 async def test_ollama_interpret_query_valid_response():
-    respx.post(OLLAMA_URL).mock(
-        return_value=Response(200, json={"message": {"content": _query_intent_json()}})
-    )
+    respx.post(OLLAMA_URL).mock(return_value=Response(200, json={"message": {"content": _query_intent_json()}}))
     provider = OllamaProvider(base_url="http://localhost:11434", model="qwen2.5:7b")
     intent = await provider.interpret_query("how much did I spend on food this week")
     assert intent.category == "Food"
@@ -270,9 +257,7 @@ async def test_ollama_interpret_query_retries_then_succeeds():
 
 @respx.mock
 async def test_ollama_interpret_query_raises_after_exhausting_retries():
-    route = respx.post(OLLAMA_URL).mock(
-        return_value=Response(200, json={"message": {"content": "not valid json"}})
-    )
+    route = respx.post(OLLAMA_URL).mock(return_value=Response(200, json={"message": {"content": "not valid json"}}))
     provider = OllamaProvider(base_url="http://localhost:11434", model="qwen2.5:7b")
     with pytest.raises(LLMDecisionError):
         await provider.interpret_query("nonsense question")
@@ -284,9 +269,7 @@ async def test_ollama_interpret_query_raises_after_exhausting_retries():
 
 async def test_claude_decide_match_valid_response(monkeypatch):
     provider = ClaudeProvider(api_key="test-key", model="claude-sonnet-5")
-    monkeypatch.setattr(
-        provider._client.messages, "create", _fake_claude_create(_decision_json(CANDIDATE_ID))
-    )
+    monkeypatch.setattr(provider._client.messages, "create", _fake_claude_create(_decision_json(CANDIDATE_ID)))
     decision = await provider.decide_match(TRANSACTION, CANDIDATES)
     assert decision.action == "auto_link"
     assert str(decision.matched_expense_id) == CANDIDATE_ID
@@ -302,9 +285,7 @@ async def test_claude_decide_match_invalid_response_raises(monkeypatch):
 async def test_claude_parse_transaction_valid_response(monkeypatch):
     provider = ClaudeProvider(api_key="test-key", model="claude-sonnet-5")
     monkeypatch.setattr(provider._client.messages, "create", _fake_claude_create(_extraction_json()))
-    extraction = await provider.parse_transaction(
-        "Rs.450 debited from A/c XX1234 at BLINKIT on 10-08-26"
-    )
+    extraction = await provider.parse_transaction("Rs.450 debited from A/c XX1234 at BLINKIT on 10-08-26")
     assert extraction.amount == 450.0
     assert extraction.is_debit is True
 
@@ -324,9 +305,7 @@ async def test_claude_extract_receipt_clear_image_returns_readable(monkeypatch):
 
 async def test_claude_extract_receipt_blurry_image_returns_unreadable(monkeypatch):
     provider = ClaudeProvider(api_key="test-key", model="claude-sonnet-5")
-    monkeypatch.setattr(
-        provider._client.messages, "create", _fake_claude_create(_receipt_json(readable=False))
-    )
+    monkeypatch.setattr(provider._client.messages, "create", _fake_claude_create(_receipt_json(readable=False)))
     receipt = await provider.extract_receipt(FAKE_IMAGE_BYTES, "image/jpeg")
     assert receipt.readable is False
     assert receipt.total_amount is None  # must not hallucinate a number
@@ -334,9 +313,7 @@ async def test_claude_extract_receipt_blurry_image_returns_unreadable(monkeypatc
 
 async def test_claude_extract_receipt_non_receipt_image_returns_unreadable(monkeypatch):
     provider = ClaudeProvider(api_key="test-key", model="claude-sonnet-5")
-    monkeypatch.setattr(
-        provider._client.messages, "create", _fake_claude_create(_receipt_json(readable=False))
-    )
+    monkeypatch.setattr(provider._client.messages, "create", _fake_claude_create(_receipt_json(readable=False)))
     receipt = await provider.extract_receipt(FAKE_IMAGE_BYTES, "image/png")
     assert receipt.readable is False
 
@@ -424,9 +401,7 @@ async def test_gemini_extract_receipt_invalid_response_raises(monkeypatch):
 
 async def test_gemini_interpret_query_valid_response(monkeypatch):
     provider = GeminiProvider(api_key="test-key", model="gemini-flash-lite-latest")
-    monkeypatch.setattr(
-        provider._client.aio.models, "generate_content", _fake_gemini_generate(_query_intent_json())
-    )
+    monkeypatch.setattr(provider._client.aio.models, "generate_content", _fake_gemini_generate(_query_intent_json()))
     intent = await provider.interpret_query("how much did I spend on food this week")
     assert intent.category == "Food"
     assert intent.date_range == "this_week"
@@ -450,9 +425,7 @@ async def test_decide_match_identical_across_providers(monkeypatch):
     provider swap actually safe, not just documented as safe."""
     decision_json = _decision_json(CANDIDATE_ID)
 
-    respx.post(OLLAMA_URL).mock(
-        return_value=Response(200, json={"message": {"content": decision_json}})
-    )
+    respx.post(OLLAMA_URL).mock(return_value=Response(200, json={"message": {"content": decision_json}}))
     ollama = OllamaProvider(base_url="http://localhost:11434", model="qwen2.5:7b")
     ollama_decision = await ollama.decide_match(TRANSACTION, CANDIDATES)
 
@@ -472,9 +445,7 @@ async def test_parse_transaction_identical_across_providers(monkeypatch):
     extraction_json = _extraction_json()
     raw_sms = "Rs.450 debited from A/c XX1234 at BLINKIT on 10-08-26"
 
-    respx.post(OLLAMA_URL).mock(
-        return_value=Response(200, json={"message": {"content": extraction_json}})
-    )
+    respx.post(OLLAMA_URL).mock(return_value=Response(200, json={"message": {"content": extraction_json}}))
     ollama = OllamaProvider(base_url="http://localhost:11434", model="qwen2.5:7b")
     ollama_extraction = await ollama.parse_transaction(raw_sms)
 
@@ -493,9 +464,7 @@ async def test_parse_transaction_identical_across_providers(monkeypatch):
 async def test_interpret_query_identical_across_providers(monkeypatch):
     intent_json = _query_intent_json()
 
-    respx.post(OLLAMA_URL).mock(
-        return_value=Response(200, json={"message": {"content": intent_json}})
-    )
+    respx.post(OLLAMA_URL).mock(return_value=Response(200, json={"message": {"content": intent_json}}))
     ollama = OllamaProvider(base_url="http://localhost:11434", model="qwen2.5:7b")
     ollama_intent = await ollama.interpret_query("how much on food this week")
 
