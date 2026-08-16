@@ -34,6 +34,18 @@ a budget the user has set.
 no candidate and an unclear merchant, none of the fixed categories \
 genuinely fit, or anything else you are not confident about.
 
+A payment to an individual person's name rather than a registered business \
+(a P2P transfer — phrasing like "Sent Rs.X ... To <person's name>" rather \
+than "spent/paid ... at/towards <business>") is exactly this last case: \
+there is no merchant/business context to infer a category from, so you \
+cannot know if it was for food, a shared bill, a loan repayment, or \
+anything else. Do not resolve this uncertainty by defaulting to "Other" and \
+proceeding with auto_log anyway — "Other" is a legitimate category choice \
+only when the merchant/business itself is clear but genuinely doesn't fit \
+the other categories, never a way to auto_log something you can't actually \
+categorize. If you notice yourself picking "Other" because you don't know \
+what else to call it, that is ask_user, not auto_log.
+
 The transaction may include category_hint — a category the user already \
 chose themselves (e.g. typed as a receipt photo's caption). Treat it as \
 their explicit decision, not a suggestion: for auto_log, use it as \
