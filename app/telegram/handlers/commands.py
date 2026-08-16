@@ -130,11 +130,15 @@ async def handle_log_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(usage)
         return
 
+    # Unlike /setbudget (which keeps asking, since a typo there would
+    # silently redirect a monthly limit), an unrecognized /log category just
+    # falls back to "Other" — the amount is never lost, and the fallback is
+    # called out in the reply so it isn't a silent surprise later.
     category = normalize_category(args[0])
+    category_note = ""
     if category is None:
-        valid = ", ".join(CATEGORIES.values())
-        await update.message.reply_text(f"Unknown category — pick one of: {valid}")
-        return
+        category_note = f" (unrecognized category {args[0]!r}, defaulted to Other)"
+        category = CATEGORIES["other"]
 
     try:
         amount = Decimal(args[1])
@@ -152,7 +156,7 @@ async def handle_log_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await log_manual_expense(session, user.id, category, amount, notes)
 
     note_suffix = f" ({notes})" if notes else ""
-    await update.message.reply_text(f"Logged: Rs.{amount:,.2f} — {category}{note_suffix}")
+    await update.message.reply_text(f"Logged: Rs.{amount:,.2f} — {category}{note_suffix}{category_note}")
 
 
 async def handle_budgets_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

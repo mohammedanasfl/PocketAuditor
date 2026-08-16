@@ -25,9 +25,15 @@ def normalize_category(raw: str) -> str | None:
     canonical CATEGORIES labels, or None if it doesn't match any. Keeps
     budgets.category and expenses.category using the same vocabulary —
     without this, a typo'd casing (or an LLM inventing "Groceries" instead
-    of "Food") would silently never match any spend."""
-    raw_normalized = raw.strip().lower()
+    of "Food") would silently never match any spend.
+
+    Tolerates a trailing-s plural/singular mismatch in either direction
+    (e.g. "others" -> "Other", "bill" -> "Bills") by comparing singularized
+    forms — not general fuzzy matching, just enough to stop a plain plural
+    typo from bouncing a user through "Unknown category" for no reason.
+    """
+    raw_key = raw.strip().lower().removesuffix("s")
     for label in CATEGORIES.values():
-        if label.lower() == raw_normalized:
+        if label.lower().removesuffix("s") == raw_key:
             return label
     return None

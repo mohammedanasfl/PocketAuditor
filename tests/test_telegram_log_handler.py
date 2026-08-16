@@ -84,15 +84,19 @@ async def test_log_is_case_insensitive_against_known_categories(tmp_path, monkey
     await engine.dispose()
 
 
-async def test_log_rejects_unknown_category(tmp_path, monkeypatch):
+async def test_log_defaults_unrecognized_category_to_other(tmp_path, monkeypatch):
     session_factory, engine = await _sqlite_session_factory(tmp_path, monkeypatch)
     update, context, replies = _make_update_and_context(["Crypto", "900"])
 
     await handle_log_command(update, context)
 
     async with session_factory() as session:
-        assert (await session.execute(select(Expense))).scalars().all() == []
-    assert len(replies) == 1 and "Unknown category" in replies[0]
+        expense = (await session.execute(select(Expense))).scalar_one()
+    assert expense.category == "Other"
+    assert expense.amount == Decimal("900")
+    assert len(replies) == 1
+    assert "Other" in replies[0]
+    assert "Crypto" in replies[0]  # fallback is called out, not silent
     await engine.dispose()
 
 
