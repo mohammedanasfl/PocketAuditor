@@ -17,6 +17,7 @@ from app.schemas import QueryIntent
 
 def _intent(**overrides) -> QueryIntent:
     defaults = dict(
+        is_expense_question=True,
         category=None,
         date_range="this_week",
         custom_start=None,

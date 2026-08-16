@@ -79,10 +79,12 @@ def _receipt_json(
 
 
 def _query_intent_json(
-    *, category: str | None = "Food", date_range: str = "this_week", aggregation: str = "sum"
+    *, category: str | None = "Food", date_range: str = "this_week", aggregation: str = "sum",
+    is_expense_question: bool = True,
 ) -> str:
     return json.dumps(
         {
+            "is_expense_question": is_expense_question,
             "category": category,
             "date_range": date_range,
             "custom_start": None,

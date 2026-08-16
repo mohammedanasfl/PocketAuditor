@@ -79,10 +79,19 @@ class QueryIntent(BaseModel):
     that turns a QueryIntent into a real, parameterized SQLAlchemy query —
     the LLM never sees or writes SQL, which is the actual safety property
     that matters for a personal-finance bot.
+
+    `is_expense_question` exists for the same reason LLMExtraction.is_transaction
+    and ExtractedReceipt.readable do: without an explicit escape hatch, the
+    model is forced to squeeze an unrelated question (a general-knowledge
+    question, a greeting, a question about the bot itself) into a spending
+    answer that happens to look plausible — e.g. "what is API?" getting
+    answered with a real total spend figure, because date_range/aggregation
+    still have to be *something*.
     """
 
     model_config = ConfigDict(extra="forbid")
 
+    is_expense_question: bool
     category: str | None
     date_range: Literal["today", "this_week", "last_week", "this_month", "last_month", "custom"]
     custom_start: date | None

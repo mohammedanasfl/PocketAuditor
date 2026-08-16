@@ -28,6 +28,7 @@ def _intent(**overrides) -> QueryIntent:
     # which resolve_date_range's own dedicated tests (tests/test_query.py)
     # already cover for the named ranges.
     defaults = dict(
+        is_expense_question=True,
         category="Food",
         date_range="custom",
         custom_start=date(2026, 8, 1),
@@ -140,6 +141,34 @@ async def test_ask_nonsense_question_gets_graceful_fallback(tmp_path, monkeypatc
 
     assert len(replies) == 1
     assert "couldn't understand" in replies[0]
+    await engine.dispose()
+
+
+async def test_ask_question_unrelated_to_expenses_does_not_run_a_query(tmp_path, monkeypatch):
+    """Regression: "what is API?" must not come back with a real (but
+    irrelevant) spend figure just because date_range/aggregation still had
+    to be *something* — is_expense_question=false must be trusted and
+    short-circuit before run_query is ever called."""
+    session_factory, engine = await _sqlite_session_factory(tmp_path, monkeypatch)
+    await _seed_user_and_expenses(session_factory)
+
+    received_calls = []
+    real_run_query = query_module.run_query
+
+    async def _spy_run_query(*args, **kwargs):
+        received_calls.append((args, kwargs))
+        return await real_run_query(*args, **kwargs)
+
+    monkeypatch.setattr(handlers_module, "run_query", _spy_run_query)
+
+    provider = _FakeProvider(intent=_intent(is_expense_question=False, intent_summary="What is API?"))
+    update, context, replies = _make_update_and_context(["what", "is", "api", "?"], provider)
+
+    await handle_ask_command(update, context)
+
+    assert received_calls == []  # run_query never called
+    assert len(replies) == 1
+    assert "only answer questions about your spending" in replies[0]
     await engine.dispose()
 
 

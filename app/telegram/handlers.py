@@ -170,6 +170,14 @@ async def handle_ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return
 
+    if not intent.is_expense_question:
+        logger.info("chat=%s: /ask question isn't about expenses: %r", chat_id, question)
+        await update.message.reply_text(
+            "I can only answer questions about your spending — try something like "
+            "'how much did I spend on food this week?'"
+        )
+        return
+
     async with SessionLocal() as session:
         user = await _get_or_create_user(session, chat_id)
         result = await run_query(session, user.id, intent)
