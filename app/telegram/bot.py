@@ -15,6 +15,7 @@ from app.telegram.handlers import (
     handle_budgets_command,
     handle_category_callback,
     handle_help_command,
+    handle_log_command,
     handle_message,
     handle_photo_message,
     handle_reconcile_command,
@@ -30,6 +31,7 @@ BOT_COMMANDS = [
     BotCommand("help", "Show the welcome message and command list"),
     BotCommand("reconcile", "Reconcile your pending transactions"),
     BotCommand("spend", "See your spend totals (week/month/year/all-time)"),
+    BotCommand("log", "Manually log cash/other spend, e.g. /log Food 900"),
     BotCommand("setbudget", "Set a monthly limit, e.g. /setbudget Food 4000"),
     BotCommand("budgets", "See your limits and this month's spend per category"),
     BotCommand("ask", "Ask about your spending, e.g. /ask how much on food this week"),
@@ -43,6 +45,7 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("help", handle_help_command))
     application.add_handler(CommandHandler("reconcile", handle_reconcile_command))
     application.add_handler(CommandHandler("spend", handle_spend_command))
+    application.add_handler(CommandHandler("log", handle_log_command))
     application.add_handler(CommandHandler("setbudget", handle_setbudget_command))
     application.add_handler(CommandHandler("budgets", handle_budgets_command))
     application.add_handler(CommandHandler("ask", handle_ask_command))

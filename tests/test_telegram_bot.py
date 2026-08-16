@@ -19,4 +19,4 @@ async def test_set_bot_commands_registers_the_command_list():
 
     assert calls == [BOT_COMMANDS]
     command_names = {c.command for c in BOT_COMMANDS}
-    assert command_names == {"start", "help", "reconcile", "spend", "setbudget", "budgets", "ask"}
+    assert command_names == {"start", "help", "reconcile", "spend", "log", "setbudget", "budgets", "ask"}

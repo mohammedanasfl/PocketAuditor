@@ -41,7 +41,7 @@ app/
   agent.py      perceive -> compare -> decide -> act loop
   budgets.py    deterministic budget-threshold alerts — no LLM involved
   query.py      QueryIntent -> parameterized SQLAlchemy query -> phrased answer
-  telegram/     bot handlers (SMS text, photo receipts, /reconcile, /setbudget, /budgets, /ask, category callback)
+  telegram/     bot handlers (SMS text, photo receipts, /reconcile, /log, /setbudget, /budgets, /ask, category callback)
   main.py       FastAPI app: /telegram/webhook, /reconcile, /check-budgets, /health
 alembic/        migrations
 tests/          pytest suite (all offline — no live Ollama/Telegram/DB needed)
@@ -329,13 +329,35 @@ set, silently making that spend invisible to `/budgets`.
 
 ---
 
+## Manual entries (`/log`)
+
+`/log <category> <amount> [notes]` (e.g. `/log Food 900 lunch with friends`)
+logs an expense directly — for spend with no bank/UPI trail at all (physical
+cash) that SMS/photo can never see in the first place. Unlike the
+SMS/photo/`ask_user` paths, there's no `Transaction` behind this at all; it
+creates the `Expense` straight away (`created_via='manual'`, no
+`linked_transaction_id`). `category` is validated the same way `/setbudget`
+validates it (see below) — reject early rather than let a typo silently
+create an expense in a category no budget will ever match.
+
+Forwarding plain text that isn't a real bank/UPI alert (e.g. typing `food
+900` directly instead of using `/log`) is deliberately rejected rather than
+guessed at — see [NL query chat](#nl-query-chat-phase-3b)'s and the SMS
+parser's `is_transaction`/`is_expense_question` guards below for why. `/log`
+is the explicit, predictable way to do this instead — same reasoning as
+`/ask` being a command rather than passive listening.
+
+---
+
 ## Budget alerts (Phase 3a)
 
 `/setbudget <category> <amount>` (e.g. `/setbudget Food 4000`) sets a
 monthly limit; `/budgets` shows current limits against this month's spend.
 `category` must match one of the same categories the `ask_user` inline
-buttons use (case-insensitively) — `app/telegram/keyboards.py:normalize_category`
-enforces this at input time. Matching a budget against actual spend is
+buttons use (case-insensitively) — `app/categories.py:normalize_category`
+enforces this at input time (the same canonical vocabulary `/log` and the
+agent's own `auto_log` category are constrained to — see
+[Photo receipts](#photo-receipts-phase-2) above). Matching a budget against actual spend is
 *also* case-insensitive (`app/budgets.py:_month_spend_by_category`) —
 `expenses.category` isn't a strict enum (an `auto_log` category can come
 from the model's own guess or a photo's `category_hint`, not guaranteed to
@@ -411,7 +433,7 @@ tests themselves never connect to Postgres or Telegram). This is CI only —
 Render keeps deploying on every push to `main` exactly as it already did;
 this workflow doesn't gate that.
 
-130 tests, all offline (mocked HTTP/API calls, aiosqlite for DB tests) — no
+137 tests, all offline (mocked HTTP/API calls, aiosqlite for DB tests) — no
 live Ollama, Telegram, Neon, or Gemini/Claude connection required. Covers:
 
 - **Provider parity** (`tests/test_llm_providers.py`,

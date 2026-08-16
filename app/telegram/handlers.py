@@ -51,6 +51,8 @@ _WELCOME_TEXT = (
     "/start — show this message\n"
     "/reconcile — reconcile your pending transactions\n"
     "/spend — see your spend totals for this week, month, year, and all time\n"
+    "/log <category> <amount> [notes] — manually log cash or other spend with "
+    "no bank alert at all, e.g. /log Food 900 lunch\n"
     "/setbudget <category> <amount> — set a monthly limit, e.g. /setbudget Food 4000\n"
     "/budgets — see your limits and this month's spend per category\n"
     "/ask <question> — ask about your spending, e.g. /ask how much on food this week\n\n"
@@ -121,6 +123,59 @@ async def handle_setbudget_command(update: Update, context: ContextTypes.DEFAULT
         await upsert_budget(session, user.id, category, amount)
 
     await update.message.reply_text(f"Budget set: {category} — Rs.{amount:,.2f}/month")
+
+
+async def handle_log_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/log <category> <amount> [notes] — manually log an expense with no
+    underlying bank/UPI transaction at all (e.g. physical cash spend). Unlike
+    the SMS/photo paths, there's nothing to reconcile against here, so this
+    creates the Expense directly — same created_via='manual' as answering an
+    ask_user question does, just without a Transaction behind it."""
+    if update.message is None:
+        return
+    chat_id = update.effective_chat.id
+    args = context.args or []
+    logger.info("chat=%s: /log %r", chat_id, args)
+
+    usage = "Usage: /log <category> <amount> [notes]\ne.g. /log Food 900 lunch with friends"
+    if len(args) < 2:
+        await update.message.reply_text(usage)
+        return
+
+    category = normalize_category(args[0])
+    if category is None:
+        valid = ", ".join(CATEGORIES.values())
+        await update.message.reply_text(f"Unknown category — pick one of: {valid}")
+        return
+
+    try:
+        amount = Decimal(args[1])
+    except InvalidOperation:
+        await update.message.reply_text(usage)
+        return
+    if amount <= 0:
+        await update.message.reply_text("Amount must be positive.")
+        return
+
+    notes = " ".join(args[2:]) or None
+
+    async with SessionLocal() as session:
+        user = await _get_or_create_user(session, chat_id)
+        expense = Expense(
+            user_id=user.id,
+            amount=amount,
+            category=category,
+            merchant=None,
+            notes=notes,
+            txn_date=date.today(),
+            created_via="manual",
+        )
+        session.add(expense)
+        await session.commit()
+        logger.info("chat=%s: manually logged expense=%s amount=%s category=%s", chat_id, expense.id, amount, category)
+
+    note_suffix = f" ({notes})" if notes else ""
+    await update.message.reply_text(f"Logged: Rs.{amount:,.2f} — {category}{note_suffix}")
 
 
 async def handle_budgets_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -235,7 +290,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         except ParseError:
             logger.info("chat=%s: could not parse a transaction from the message", chat_id)
             await update.message.reply_text(
-                "I couldn't find a transaction in that message — forward the original bank/UPI SMS."
+                "I couldn't find a transaction in that message — forward the original bank/UPI "
+                "SMS, or if this was cash with no bank alert, log it directly: "
+                "/log <category> <amount>, e.g. /log Food 900"
             )
             return
 
@@ -290,13 +347,15 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
     except NotImplementedError:
         logger.warning("chat=%s: extract_receipt not implemented for this provider", chat_id)
         await update.message.reply_text(
-            "Photo receipts aren't supported by the current LLM setup — type the expense manually for now."
+            "Photo receipts aren't supported by the current LLM setup — "
+            "log it yourself instead: /log <category> <amount>"
         )
         return
     except LLMDecisionError as exc:
         logger.warning("chat=%s: extract_receipt failed: %s", chat_id, exc)
         await update.message.reply_text(
-            "I couldn't read that photo — try retaking it, or type the expense manually."
+            "I couldn't read that photo — try retaking it, or log it yourself: "
+            "/log <category> <amount>"
         )
         return
 
@@ -306,7 +365,8 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
             chat_id, receipt.readable, receipt.confidence, receipt.total_amount,
         )
         await update.message.reply_text(
-            "That photo wasn't clear enough to read reliably — retake it, or type the expense manually."
+            "That photo wasn't clear enough to read reliably — retake it, or log it yourself: "
+            "/log <category> <amount>"
         )
         return
 
