@@ -17,6 +17,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.categories import normalize_category
 from app.config import settings
 from app.llm.base import LLMDecisionError, LLMProvider
 from app.models import Expense, ReconciliationRun, Transaction
@@ -117,14 +118,23 @@ async def _find_candidates(session: AsyncSession, user_id: UUID, txn: Transactio
 def _apply_guard(decision: MatchDecision, candidate_ids: set[str], txn: Transaction) -> MatchDecision:
     """Enforce conservatism in code, not just via the prompt — a 7B model
     will not reliably obey a prompt-only rule. Downgrades auto_link/auto_log
-    to ask_user when confidence is below threshold, when the model names a
-    matched_expense_id that wasn't actually among the candidates offered
-    (treated as a hallucination), or when a photo-sourced transaction has no
-    user-provided category_hint — a receipt photo with no caption and an
-    unfamiliar merchant (e.g. a personal name from a P2P transfer) is exactly
-    the ambiguous case that should ask rather than let the model guess a
-    category. ask_user decisions pass through untouched — they're already
-    the conservative choice."""
+    to ask_user when:
+    - confidence is below threshold;
+    - the model names a matched_expense_id that wasn't actually among the
+      candidates offered (treated as a hallucination);
+    - a photo-sourced transaction has no user-provided category_hint — a
+      receipt photo with no caption and an unfamiliar merchant (e.g. a
+      personal name from a P2P transfer) is exactly the ambiguous case that
+      should ask rather than let the model guess a category;
+    - auto_log's suggested_category doesn't match one of the canonical
+      CATEGORIES (case-insensitively) and there's no category_hint to fall
+      back on — an SMS merchant can be perfectly recognizable (e.g. "MUTHU
+      SUPER MARKET") while the model still invents an uncontrolled category
+      string ("Groceries", "Food & Dining") that /setbudget and /budgets can
+      never match, silently making that spend invisible to the budget it
+      should count against.
+    ask_user decisions pass through untouched — they're already the
+    conservative choice."""
     if decision.action == "ask_user":
         return decision
 
@@ -135,8 +145,14 @@ def _apply_guard(decision: MatchDecision, candidate_ids: set[str], txn: Transact
         decision.matched_expense_id is None or str(decision.matched_expense_id) not in candidate_ids
     ):
         guard_note = "matched_expense_id was not among the candidates offered"
-    elif decision.action == "auto_log" and txn.source == "photo" and not txn.category_hint:
-        guard_note = "photo transaction has no category hint — asking instead of guessing"
+    elif decision.action == "auto_log" and not txn.category_hint:
+        if txn.source == "photo":
+            guard_note = "photo transaction has no category hint — asking instead of guessing"
+        elif normalize_category(decision.suggested_category or "") is None:
+            guard_note = (
+                f"suggested category {decision.suggested_category!r} isn't one of the known "
+                "categories — asking instead of guessing"
+            )
 
     if guard_note is None:
         return decision
@@ -165,6 +181,26 @@ def _apply_category_hint(decision: MatchDecision, txn: Transaction) -> MatchDeci
         action=decision.action,
         matched_expense_id=decision.matched_expense_id,
         suggested_category=txn.category_hint,
+        confidence=decision.confidence,
+        reasoning=decision.reasoning,
+    )
+
+
+def _normalize_auto_log_category(decision: MatchDecision) -> MatchDecision:
+    """Once auto_log has passed _apply_guard, its suggested_category is
+    guaranteed to normalize to one of the canonical CATEGORIES (or to have
+    come from category_hint, which is already canonical) — this just fixes
+    up casing so the ledger is consistent with /setbudget and the ask_user
+    buttons, e.g. a model-returned "food" becomes "Food"."""
+    if decision.action != "auto_log" or not decision.suggested_category:
+        return decision
+    normalized = normalize_category(decision.suggested_category)
+    if normalized is None or normalized == decision.suggested_category:
+        return decision
+    return MatchDecision(
+        action=decision.action,
+        matched_expense_id=decision.matched_expense_id,
+        suggested_category=normalized,
         confidence=decision.confidence,
         reasoning=decision.reasoning,
     )
@@ -250,6 +286,7 @@ async def reconcile_user(session: AsyncSession, provider: LLMProvider, user_id: 
 
         decision = _apply_guard(decision, candidate_ids, txn)
         decision = _apply_category_hint(decision, txn)
+        decision = _normalize_auto_log_category(decision)
         pending = await _act(session, user_id, txn, decision)
         logger.info(
             "txn=%s: decision=%s confidence=%.2f candidates=%d",

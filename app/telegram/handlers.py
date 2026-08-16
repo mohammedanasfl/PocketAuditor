@@ -20,6 +20,7 @@ from telegram.ext import ContextTypes
 
 from app.agent import PendingQuestion, reconcile_user
 from app.budgets import format_budgets_message, get_budget_statuses, upsert_budget
+from app.categories import CATEGORIES, normalize_category
 from app.config import settings
 from app.db import SessionLocal
 from app.llm.base import LLMDecisionError
@@ -27,7 +28,7 @@ from app.models import Expense, ReconciliationRun, Transaction, User
 from app.parser import ParseError, parse_sms
 from app.query import run_query
 from app.reports import get_spend_summary
-from app.telegram.keyboards import CATEGORIES, category_keyboard, normalize_category
+from app.telegram.keyboards import category_keyboard
 
 logger = logging.getLogger(__name__)
 

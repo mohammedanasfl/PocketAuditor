@@ -139,7 +139,11 @@ async def test_auto_log_creates_new_expense(db_session):
     assert expense.linked_transaction_id == txn.id
 
 
-async def test_auto_log_falls_back_to_uncategorized_when_no_category_suggested(db_session):
+async def test_auto_log_with_no_category_and_no_hint_asks_instead_of_uncategorized(db_session):
+    """Behavior deliberately changed alongside the "Groceries"/"Food & Dining"
+    fix below: "Uncategorized" is just as budget-invisible as any other
+    category outside the fixed list, so a missing suggested_category now
+    asks rather than silently logging something /budgets can never match."""
     user = await _make_user(db_session)
     await _make_transaction(
         db_session, user, amount="50.00", merchant="Unknown Shop", txn_date=date(2026, 8, 12)
@@ -156,10 +160,11 @@ async def test_auto_log_falls_back_to_uncategorized_when_no_category_suggested(d
             )
         ]
     )
-    await reconcile_user(db_session, provider, user.id)
+    summary = await reconcile_user(db_session, provider, user.id)
 
-    expense = (await db_session.execute(select(Expense))).scalar_one()
-    assert expense.category == "Uncategorized"
+    assert summary.auto_logged == 0
+    assert summary.asked_user == 1
+    assert (await db_session.execute(select(Expense))).scalars().all() == []
 
 
 # --- ask_user ----------------------------------------------------------
@@ -294,9 +299,10 @@ async def test_photo_auto_log_with_no_category_hint_is_downgraded_to_ask_user(db
     assert "no category hint" in run.reasoning
 
 
-async def test_sms_auto_log_with_no_category_hint_is_unaffected(db_session):
-    """The new guard is specific to photo transactions — SMS has no caption
-    concept at all, so it must keep auto-logging exactly as before."""
+async def test_sms_auto_log_with_a_known_category_is_unaffected(db_session):
+    """SMS has no caption concept to hint from, but a recognizable merchant
+    and a category matching the fixed CATEGORIES list should still auto-log
+    exactly as before — the new guards only fire on genuine ambiguity."""
     user = await _make_user(db_session)
     await _make_transaction(
         db_session, user, amount="220.00", merchant="Zomato", txn_date=date(2026, 8, 12), source="sms",
@@ -313,6 +319,62 @@ async def test_sms_auto_log_with_no_category_hint_is_unaffected(db_session):
 
     summary = await reconcile_user(db_session, provider, user.id)
     assert summary.auto_logged == 1
+
+
+async def test_sms_auto_log_with_unrecognized_category_is_downgraded_to_ask_user(db_session):
+    """Regression: a recognizable merchant (unlike the personal-name photo
+    case) still shouldn't auto-log under a made-up category name — "Groceries"
+    and "Food & Dining" can never be tracked against a "Food" budget, making
+    that spend silently invisible. This was found live: a real "MUTHU SUPER
+    MARKET" SMS got auto-logged as "Groceries" and never counted toward the
+    user's Food budget."""
+    user = await _make_user(db_session)
+    await _make_transaction(
+        db_session, user, amount="900.00", merchant="MUTHU SUPER MARKET", txn_date=date(2026, 8, 10),
+        source="sms",
+    )
+
+    provider = _ScriptedProvider(
+        [
+            MatchDecision(
+                action="auto_log", matched_expense_id=None, suggested_category="Groceries",
+                confidence=0.9, reasoning="Clear supermarket purchase.",
+            )
+        ]
+    )
+
+    summary = await reconcile_user(db_session, provider, user.id)
+
+    assert summary.auto_logged == 0
+    assert summary.asked_user == 1
+    run = (await db_session.execute(select(ReconciliationRun))).scalar_one()
+    assert "isn't one of the known categories" in run.reasoning
+
+
+async def test_sms_auto_log_category_casing_is_normalized(db_session):
+    """A category that DOES match one of the known categories, just with
+    different casing, should auto-log with the canonical casing rather than
+    asking or storing the raw casing — keeps the ledger consistent with
+    /setbudget and the ask_user buttons."""
+    user = await _make_user(db_session)
+    await _make_transaction(
+        db_session, user, amount="220.00", merchant="Zomato", txn_date=date(2026, 8, 12), source="sms",
+    )
+
+    provider = _ScriptedProvider(
+        [
+            MatchDecision(
+                action="auto_log", matched_expense_id=None, suggested_category="food",  # lowercase
+                confidence=0.9, reasoning="Clear food-delivery spend.",
+            )
+        ]
+    )
+
+    summary = await reconcile_user(db_session, provider, user.id)
+
+    assert summary.auto_logged == 1
+    expense = (await db_session.execute(select(Expense))).scalar_one()
+    assert expense.category == "Food"  # normalized to canonical casing
 
 
 # --- category_hint overrides the model's own suggested_category -----------

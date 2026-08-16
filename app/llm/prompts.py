@@ -9,7 +9,11 @@ from __future__ import annotations
 import json
 from datetime import date
 
-DECIDE_SYSTEM = """You are a financial reconciliation assistant for a personal expense tracker.
+from app.categories import CATEGORIES
+
+_CATEGORY_LIST = ", ".join(CATEGORIES.values())
+
+DECIDE_SYSTEM = f"""You are a financial reconciliation assistant for a personal expense tracker.
 
 You are given one transaction (from a bank/UPI SMS or a receipt photo) and \
 up to three candidate expenses the same user already logged manually, \
@@ -21,10 +25,14 @@ transaction (matching amount, a plausible date, and a merchant that is the \
 same or clearly related). Set matched_expense_id to that candidate's id.
 - auto_log: no candidate is a match, but the transaction itself is \
 unambiguous enough to log as a new expense (a clear amount and a \
-recognizable merchant). Suggest a category for it.
+recognizable merchant). Suggest a category for it — it must be exactly one \
+of: {_CATEGORY_LIST}. If none of these genuinely fit, choose ask_user \
+instead of inventing a new category name (e.g. "Groceries" or "Food & \
+Dining") — a category outside this fixed list can never be tracked against \
+a budget the user has set.
 - ask_user: the situation is ambiguous — more than one plausible candidate, \
-no candidate and an unclear merchant, or anything else you are not \
-confident about.
+no candidate and an unclear merchant, none of the fixed categories \
+genuinely fit, or anything else you are not confident about.
 
 The transaction may include category_hint — a category the user already \
 chose themselves (e.g. typed as a receipt photo's caption). Treat it as \

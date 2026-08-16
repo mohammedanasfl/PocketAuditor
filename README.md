@@ -313,14 +313,19 @@ matching one of the known categories (e.g. "Food") and it's stored as
 `transactions.category_hint` — the agent loop trusts this over its own
 guess (`app/agent.py:_apply_category_hint` overrides `suggested_category`
 with it outright for `auto_log`, regardless of what the model itself
-suggests). **No caption (or a caption that isn't a recognized category)
-on a photo means the reconciliation loop will *ask* rather than guess** —
+suggests). **No caption (or a caption that isn't a recognized category) on
+a photo means the reconciliation loop will *ask* rather than guess** —
 `auto_log` gets downgraded to `ask_user` specifically for photo-sourced
-transactions with no hint (`app/agent.py:_apply_guard`), since an
-unfamiliar merchant name (e.g. a personal name from a P2P transfer
-screenshot) is exactly the case a model shouldn't be confidently
-auto-categorizing. This guard is unique to photos — SMS text has no
-caption concept to hint from, so its auto_log behavior is unchanged.
+transactions with no hint, since an unfamiliar merchant name (e.g. a
+personal name from a P2P transfer screenshot) is exactly the case a model
+shouldn't be confidently auto-categorizing. This particular guard is unique
+to photos — SMS text has no caption concept to hint from. A related but
+broader guard applies to *both* sources, though: `auto_log`'s
+`suggested_category` must match one of the fixed `CATEGORIES` (`app/categories.py`)
+or it gets downgraded to `ask_user` too — found live when a real SMS for a
+recognizable merchant ("MUTHU SUPER MARKET") got auto-logged as `"Groceries"`,
+a category that could never match a `"Food"` budget the user had actually
+set, silently making that spend invisible to `/budgets`.
 
 ---
 
@@ -406,7 +411,7 @@ tests themselves never connect to Postgres or Telegram). This is CI only —
 Render keeps deploying on every push to `main` exactly as it already did;
 this workflow doesn't gate that.
 
-127 tests, all offline (mocked HTTP/API calls, aiosqlite for DB tests) — no
+130 tests, all offline (mocked HTTP/API calls, aiosqlite for DB tests) — no
 live Ollama, Telegram, Neon, or Gemini/Claude connection required. Covers:
 
 - **Provider parity** (`tests/test_llm_providers.py`,
