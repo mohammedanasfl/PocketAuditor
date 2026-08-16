@@ -70,6 +70,7 @@ def _transaction_to_dict(txn: Transaction) -> dict:
         "merchant": txn.merchant,
         "txn_date": txn.txn_date.isoformat(),
         "raw_text": txn.raw_text,
+        "category_hint": txn.category_hint,
     }
 
 
@@ -113,13 +114,17 @@ async def _find_candidates(session: AsyncSession, user_id: UUID, txn: Transactio
     return candidates[:_MAX_CANDIDATES]
 
 
-def _apply_guard(decision: MatchDecision, candidate_ids: set[str]) -> MatchDecision:
+def _apply_guard(decision: MatchDecision, candidate_ids: set[str], txn: Transaction) -> MatchDecision:
     """Enforce conservatism in code, not just via the prompt — a 7B model
     will not reliably obey a prompt-only rule. Downgrades auto_link/auto_log
-    to ask_user when confidence is below threshold, or when the model names
-    a matched_expense_id that wasn't actually among the candidates offered
-    (treated as a hallucination). ask_user decisions pass through untouched —
-    they're already the conservative choice."""
+    to ask_user when confidence is below threshold, when the model names a
+    matched_expense_id that wasn't actually among the candidates offered
+    (treated as a hallucination), or when a photo-sourced transaction has no
+    user-provided category_hint — a receipt photo with no caption and an
+    unfamiliar merchant (e.g. a personal name from a P2P transfer) is exactly
+    the ambiguous case that should ask rather than let the model guess a
+    category. ask_user decisions pass through untouched — they're already
+    the conservative choice."""
     if decision.action == "ask_user":
         return decision
 
@@ -130,6 +135,8 @@ def _apply_guard(decision: MatchDecision, candidate_ids: set[str]) -> MatchDecis
         decision.matched_expense_id is None or str(decision.matched_expense_id) not in candidate_ids
     ):
         guard_note = "matched_expense_id was not among the candidates offered"
+    elif decision.action == "auto_log" and txn.source == "photo" and not txn.category_hint:
+        guard_note = "photo transaction has no category hint — asking instead of guessing"
 
     if guard_note is None:
         return decision
@@ -141,6 +148,25 @@ def _apply_guard(decision: MatchDecision, candidate_ids: set[str]) -> MatchDecis
         suggested_category=decision.suggested_category,
         confidence=decision.confidence,
         reasoning=f"{decision.reasoning} [downgraded to ask_user: {guard_note}]",
+    )
+
+
+def _apply_category_hint(decision: MatchDecision, txn: Transaction) -> MatchDecision:
+    """A category_hint is the user's explicit choice (e.g. from a receipt
+    photo's caption) — trust it over whatever category the model guessed,
+    same "guard in code, don't just hope the prompt used it" reasoning as
+    _apply_guard. Only touches auto_log; auto_link uses the matched
+    expense's own category, and ask_user is already deferring to the user."""
+    if decision.action != "auto_log" or not txn.category_hint:
+        return decision
+    if decision.suggested_category == txn.category_hint:
+        return decision
+    return MatchDecision(
+        action=decision.action,
+        matched_expense_id=decision.matched_expense_id,
+        suggested_category=txn.category_hint,
+        confidence=decision.confidence,
+        reasoning=decision.reasoning,
     )
 
 
@@ -222,7 +248,8 @@ async def reconcile_user(session: AsyncSession, provider: LLMProvider, user_id: 
             summary.errors += 1
             continue
 
-        decision = _apply_guard(decision, candidate_ids)
+        decision = _apply_guard(decision, candidate_ids, txn)
+        decision = _apply_category_hint(decision, txn)
         pending = await _act(session, user_id, txn, decision)
         logger.info(
             "txn=%s: decision=%s confidence=%.2f candidates=%d",

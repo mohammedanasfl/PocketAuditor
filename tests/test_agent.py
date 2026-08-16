@@ -40,13 +40,18 @@ async def _make_user(session) -> User:
     return user
 
 
-async def _make_transaction(session, user: User, *, amount: str, merchant: str, txn_date: date) -> Transaction:
+async def _make_transaction(
+    session, user: User, *, amount: str, merchant: str, txn_date: date,
+    source: str = "sms", category_hint: str | None = None,
+) -> Transaction:
     txn = Transaction(
         user_id=user.id,
         raw_text=f"Rs.{amount} debited towards {merchant}",
         amount=Decimal(amount),
         merchant=merchant,
         txn_date=txn_date,
+        source=source,
+        category_hint=category_hint,
         status="pending",
     )
     session.add(txn)
@@ -259,6 +264,83 @@ async def test_hallucinated_matched_expense_id_is_downgraded_to_ask_user(db_sess
 
     run = (await db_session.execute(select(ReconciliationRun))).scalar_one()
     assert "not among the candidates" in run.reasoning
+
+
+# --- guard: photo auto_log with no category_hint asks instead of guessing --
+
+
+async def test_photo_auto_log_with_no_category_hint_is_downgraded_to_ask_user(db_session):
+    user = await _make_user(db_session)
+    await _make_transaction(
+        db_session, user, amount="150.00", merchant="Surendra Kumar Kachurimal",
+        txn_date=date(2026, 8, 9), source="photo",  # no category_hint — no caption was given
+    )
+
+    provider = _ScriptedProvider(
+        [
+            MatchDecision(
+                action="auto_log", matched_expense_id=None, suggested_category="Other",
+                confidence=0.9, reasoning="Clear amount, unclear category.",
+            )
+        ]
+    )
+
+    summary = await reconcile_user(db_session, provider, user.id)
+
+    assert summary.auto_logged == 0
+    assert summary.asked_user == 1
+    run = (await db_session.execute(select(ReconciliationRun))).scalar_one()
+    assert run.decision == "ask_user"
+    assert "no category hint" in run.reasoning
+
+
+async def test_sms_auto_log_with_no_category_hint_is_unaffected(db_session):
+    """The new guard is specific to photo transactions — SMS has no caption
+    concept at all, so it must keep auto-logging exactly as before."""
+    user = await _make_user(db_session)
+    await _make_transaction(
+        db_session, user, amount="220.00", merchant="Zomato", txn_date=date(2026, 8, 12), source="sms",
+    )
+
+    provider = _ScriptedProvider(
+        [
+            MatchDecision(
+                action="auto_log", matched_expense_id=None, suggested_category="Food",
+                confidence=0.9, reasoning="Clear food-delivery spend.",
+            )
+        ]
+    )
+
+    summary = await reconcile_user(db_session, provider, user.id)
+    assert summary.auto_logged == 1
+
+
+# --- category_hint overrides the model's own suggested_category -----------
+
+
+async def test_photo_category_hint_overrides_suggested_category(db_session):
+    """A caption is the user's explicit choice — even if the model suggests
+    a different category, the hint wins."""
+    user = await _make_user(db_session)
+    await _make_transaction(
+        db_session, user, amount="450.00", merchant="Reliance Fresh", txn_date=date(2026, 8, 14),
+        source="photo", category_hint="Food",
+    )
+
+    provider = _ScriptedProvider(
+        [
+            MatchDecision(
+                action="auto_log", matched_expense_id=None, suggested_category="Shopping",
+                confidence=0.9, reasoning="Looks like a retail purchase.",
+            )
+        ]
+    )
+
+    summary = await reconcile_user(db_session, provider, user.id)
+
+    assert summary.auto_logged == 1  # category_hint present -> guard doesn't fire
+    expense = (await db_session.execute(select(Expense))).scalar_one()
+    assert expense.category == "Food"  # hint wins over the model's "Shopping" guess
 
 
 # --- per-transaction LLM error doesn't abort the batch ---------------------

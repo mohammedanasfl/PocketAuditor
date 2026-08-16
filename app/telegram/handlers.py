@@ -302,6 +302,12 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     txn_date = receipt.txn_date or date.today()
+    # A caption is the user explicitly telling us the category up front (e.g.
+    # sending a receipt photo with "Food" as the caption) — trust it over
+    # letting the agent loop guess one later. normalize_category rejects
+    # anything that isn't one of the known categories rather than silently
+    # accepting a typo as a brand-new one.
+    category_hint = normalize_category(update.message.caption) if update.message.caption else None
     raw_text = (
         f"[Photo receipt] merchant={receipt.merchant!r} "
         f"line_items={receipt.line_items or []}"
@@ -316,18 +322,20 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
             merchant=receipt.merchant,
             txn_date=txn_date,
             source="photo",
+            category_hint=category_hint,
             status="pending",
         )
         session.add(txn)
         await session.commit()
         logger.info(
-            "chat=%s: created transaction=%s amount=%s merchant=%r txn_date=%s (source=photo, confidence=%.2f)",
-            chat_id, txn.id, receipt.total_amount, receipt.merchant, txn_date, receipt.confidence,
+            "chat=%s: created transaction=%s amount=%s merchant=%r txn_date=%s category_hint=%r (source=photo, confidence=%.2f)",
+            chat_id, txn.id, receipt.total_amount, receipt.merchant, txn_date, category_hint, receipt.confidence,
         )
 
+    category_note = f" — categorized as {category_hint}" if category_hint else ""
     await update.message.reply_text(
         f"Got it — Rs.{receipt.total_amount} at {receipt.merchant or 'unknown merchant'} on "
-        f"{txn_date}. Run /reconcile when you're ready."
+        f"{txn_date}{category_note}. Run /reconcile when you're ready."
     )
 
 

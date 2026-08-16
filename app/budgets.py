@@ -74,10 +74,14 @@ async def upsert_budget(session: AsyncSession, user_id: UUID, category: str, mon
 
 
 async def _month_spend_by_category(session: AsyncSession, user_id: UUID, month_start: date) -> dict[str, Decimal]:
+    """Keyed by lowercased category. expenses.category isn't a strict enum —
+    an auto_log category can come from the LLM's own guess or a category_hint
+    and isn't guaranteed to match /setbudget's exact casing — so matching
+    must be case-insensitive here too, same as app/query.py's /ask filter."""
     stmt = (
-        select(Expense.category, func.sum(Expense.amount))
+        select(func.lower(Expense.category), func.sum(Expense.amount))
         .where(Expense.user_id == user_id, Expense.txn_date >= month_start)
-        .group_by(Expense.category)
+        .group_by(func.lower(Expense.category))
     )
     rows = (await session.execute(stmt)).all()
     return {category: Decimal(str(spent)) for category, spent in rows}
@@ -98,7 +102,7 @@ async def get_budget_statuses(session: AsyncSession, user_id: UUID, *, today: da
         BudgetStatus(
             category=budget.category,
             monthly_limit=budget.monthly_limit,
-            spent=spend_by_category.get(budget.category, Decimal("0")),
+            spent=spend_by_category.get(budget.category.lower(), Decimal("0")),
         )
         for budget in budgets
     ]
@@ -128,7 +132,7 @@ async def check_budget_alerts(session: AsyncSession, user_id: UUID, *, today: da
         if budget.monthly_limit <= 0:
             continue  # degenerate config — nothing sensible to alert against
 
-        spent = spend_by_category.get(budget.category, Decimal("0"))
+        spent = spend_by_category.get(budget.category.lower(), Decimal("0"))
         if spent / budget.monthly_limit < _ALERT_THRESHOLD_PCT:
             continue
 

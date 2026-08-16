@@ -135,6 +135,22 @@ async def test_get_budget_statuses_lists_limit_and_spend(db_session):
     assert by_category["Transport"].spent == Decimal("0")
 
 
+async def test_budget_matching_is_case_insensitive_against_expense_category(db_session):
+    """Regression: expenses.category isn't a strict enum — an auto_log
+    category from the LLM (or a photo caption's category_hint) isn't
+    guaranteed to match /setbudget's exact casing. A "food"-cased expense
+    must still count against a "Food"-cased budget."""
+    user = await _make_user(db_session)
+    await upsert_budget(db_session, user.id, "Food", Decimal("1000.00"))
+    await _make_expense(db_session, user, amount="300.00", category="food", txn_date=date(2026, 8, 5))
+
+    statuses = await get_budget_statuses(db_session, user.id, today=date(2026, 8, 15))
+    assert statuses[0].spent == Decimal("300.00")
+
+    alerts = await check_budget_alerts(db_session, user.id, today=date(2026, 8, 15))
+    assert alerts == []  # 300/1000 = 30%, correctly below the 80% threshold
+
+
 async def test_format_budgets_message_when_none_set():
     assert "No budgets set" in format_budgets_message([])
 

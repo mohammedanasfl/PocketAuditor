@@ -308,6 +308,20 @@ model:
   right now, not `filters.Document.IMAGE` — that's a possible follow-up if
   compression turns out to hurt real receipts, not something built in Phase 2.
 
+**Caption = your explicit category choice.** Send the photo with a caption
+matching one of the known categories (e.g. "Food") and it's stored as
+`transactions.category_hint` — the agent loop trusts this over its own
+guess (`app/agent.py:_apply_category_hint` overrides `suggested_category`
+with it outright for `auto_log`, regardless of what the model itself
+suggests). **No caption (or a caption that isn't a recognized category)
+on a photo means the reconciliation loop will *ask* rather than guess** —
+`auto_log` gets downgraded to `ask_user` specifically for photo-sourced
+transactions with no hint (`app/agent.py:_apply_guard`), since an
+unfamiliar merchant name (e.g. a personal name from a P2P transfer
+screenshot) is exactly the case a model shouldn't be confidently
+auto-categorizing. This guard is unique to photos — SMS text has no
+caption concept to hint from, so its auto_log behavior is unchanged.
+
 ---
 
 ## Budget alerts (Phase 3a)
@@ -316,8 +330,12 @@ model:
 monthly limit; `/budgets` shows current limits against this month's spend.
 `category` must match one of the same categories the `ask_user` inline
 buttons use (case-insensitively) — `app/telegram/keyboards.py:normalize_category`
-enforces this, so a budget can never silently fail to match any spend because
-of a typo'd casing.
+enforces this at input time. Matching a budget against actual spend is
+*also* case-insensitive (`app/budgets.py:_month_spend_by_category`) —
+`expenses.category` isn't a strict enum (an `auto_log` category can come
+from the model's own guess or a photo's `category_hint`, not guaranteed to
+match `/setbudget`'s exact casing), so both sides of the comparison are
+lowercased.
 
 **Deterministic, not LLM-backed** — `app/budgets.py` is pure SQL aggregation
 against `expenses` (`SUM(amount) WHERE txn_date >= this month's start GROUP BY
@@ -388,7 +406,7 @@ tests themselves never connect to Postgres or Telegram). This is CI only —
 Render keeps deploying on every push to `main` exactly as it already did;
 this workflow doesn't gate that.
 
-119 tests, all offline (mocked HTTP/API calls, aiosqlite for DB tests) — no
+127 tests, all offline (mocked HTTP/API calls, aiosqlite for DB tests) — no
 live Ollama, Telegram, Neon, or Gemini/Claude connection required. Covers:
 
 - **Provider parity** (`tests/test_llm_providers.py`,

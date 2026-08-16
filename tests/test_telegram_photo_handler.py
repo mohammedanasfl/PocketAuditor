@@ -46,13 +46,15 @@ class _FakeBot:
         return _FakeFile()
 
 
-def _make_update():
+def _make_update(caption: str | None = None):
     replies: list[str] = []
 
     async def reply_text(text: str) -> None:
         replies.append(text)
 
-    message = SimpleNamespace(photo=[SimpleNamespace(file_id="abc123")], reply_text=reply_text)
+    message = SimpleNamespace(
+        photo=[SimpleNamespace(file_id="abc123")], caption=caption, reply_text=reply_text
+    )
     update = SimpleNamespace(message=message, effective_chat=SimpleNamespace(id=555))
     return update, replies
 
@@ -97,6 +99,72 @@ async def test_readable_receipt_creates_photo_transaction(tmp_path, monkeypatch)
 
     assert len(replies) == 1
     assert "450.0" in replies[0] and "Reliance Fresh" in replies[0]
+    await engine.dispose()
+
+
+async def test_photo_caption_sets_category_hint(tmp_path, monkeypatch):
+    session_factory, engine = await _sqlite_session_factory(tmp_path, monkeypatch)
+    update, replies = _make_update(caption="Food")
+    receipt = ExtractedReceipt(
+        merchant="Reliance Fresh", total_amount=450.0, txn_date=date(2026, 8, 14),
+        line_items=None, confidence=0.9, readable=True,
+    )
+    context = SimpleNamespace(bot_data={"llm_provider": _FakeProvider(receipt=receipt)}, bot=_FakeBot())
+
+    await handle_photo_message(update, context)
+
+    txn = (await _all_transactions(session_factory))[0]
+    assert txn.category_hint == "Food"
+    assert "categorized as Food" in replies[0]
+    await engine.dispose()
+
+
+async def test_photo_caption_is_case_insensitive_against_known_categories(tmp_path, monkeypatch):
+    session_factory, engine = await _sqlite_session_factory(tmp_path, monkeypatch)
+    update, replies = _make_update(caption="food")  # lowercase
+    receipt = ExtractedReceipt(
+        merchant="Reliance Fresh", total_amount=450.0, txn_date=date(2026, 8, 14),
+        line_items=None, confidence=0.9, readable=True,
+    )
+    context = SimpleNamespace(bot_data={"llm_provider": _FakeProvider(receipt=receipt)}, bot=_FakeBot())
+
+    await handle_photo_message(update, context)
+
+    txn = (await _all_transactions(session_factory))[0]
+    assert txn.category_hint == "Food"  # normalized to canonical casing
+    await engine.dispose()
+
+
+async def test_photo_unrecognized_caption_leaves_category_hint_null(tmp_path, monkeypatch):
+    session_factory, engine = await _sqlite_session_factory(tmp_path, monkeypatch)
+    update, replies = _make_update(caption="lunch with friends")  # not one of CATEGORIES
+    receipt = ExtractedReceipt(
+        merchant="Reliance Fresh", total_amount=450.0, txn_date=date(2026, 8, 14),
+        line_items=None, confidence=0.9, readable=True,
+    )
+    context = SimpleNamespace(bot_data={"llm_provider": _FakeProvider(receipt=receipt)}, bot=_FakeBot())
+
+    await handle_photo_message(update, context)
+
+    txn = (await _all_transactions(session_factory))[0]
+    assert txn.category_hint is None
+    assert "categorized as" not in replies[0]
+    await engine.dispose()
+
+
+async def test_photo_with_no_caption_leaves_category_hint_null(tmp_path, monkeypatch):
+    session_factory, engine = await _sqlite_session_factory(tmp_path, monkeypatch)
+    update, replies = _make_update()  # no caption
+    receipt = ExtractedReceipt(
+        merchant="Reliance Fresh", total_amount=450.0, txn_date=date(2026, 8, 14),
+        line_items=None, confidence=0.9, readable=True,
+    )
+    context = SimpleNamespace(bot_data={"llm_provider": _FakeProvider(receipt=receipt)}, bot=_FakeBot())
+
+    await handle_photo_message(update, context)
+
+    txn = (await _all_transactions(session_factory))[0]
+    assert txn.category_hint is None
     await engine.dispose()
 
 

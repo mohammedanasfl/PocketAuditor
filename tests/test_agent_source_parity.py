@@ -1,8 +1,15 @@
 """Stage 3 test (Phase 2 brief): a source='photo' transaction must flow
-through reconcile_user identically to a source='sms' one. agent.py never
-reads Transaction.source anywhere in the perceive/compare/decide/act loop —
-this test is the proof of that, exercised through all three actions plus the
-confidence guard, rather than just an assertion that the field exists.
+through reconcile_user identically to a source='sms' one, GIVEN the same
+category_hint. agent.py's perceive/compare/decide/act loop doesn't otherwise
+branch on Transaction.source — this test is the proof of that, exercised
+through all three actions plus the confidence guard.
+
+One deliberate exception exists: a photo with NO category_hint (no caption,
+or an unrecognized one) gets its auto_log downgraded to ask_user rather than
+letting the model guess a category for an unfamiliar merchant — that's not a
+"source" special-case so much as photos being the only source that can carry
+an explicit user-provided category at all. Covered separately in
+tests/test_agent.py, not here.
 """
 
 from __future__ import annotations
@@ -44,7 +51,8 @@ async def _make_expense(session, user: User, *, amount: str, category: str, txn_
 
 
 async def _make_transaction(
-    session, user: User, *, amount: str, merchant: str, txn_date: date, source: str
+    session, user: User, *, amount: str, merchant: str, txn_date: date, source: str,
+    category_hint: str | None = None,
 ) -> Transaction:
     txn = Transaction(
         user_id=user.id,
@@ -53,6 +61,7 @@ async def _make_transaction(
         merchant=merchant,
         txn_date=txn_date,
         source=source,
+        category_hint=category_hint,
         status="pending",
     )
     session.add(txn)
@@ -71,7 +80,8 @@ async def test_all_three_actions_and_the_guard_behave_identically_by_source(db_s
         db_session, user, amount="450.00", merchant="Blinkit", txn_date=date(2026, 8, 10), source=source
     )
     log_txn = await _make_transaction(
-        db_session, user, amount="220.00", merchant="Zomato", txn_date=date(2026, 8, 12), source=source
+        db_session, user, amount="220.00", merchant="Zomato", txn_date=date(2026, 8, 12), source=source,
+        category_hint="Food",  # present so photo's auto_log guard doesn't fire — see module docstring
     )
     ask_txn = await _make_transaction(
         db_session, user, amount="999.00", merchant="???", txn_date=date(2026, 8, 12), source=source

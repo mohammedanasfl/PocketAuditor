@@ -57,6 +57,10 @@ class Transaction(Base):
     merchant: Mapped[str | None] = mapped_column(Text, nullable=True)
     txn_date: Mapped[date] = mapped_column(Date, nullable=False)
     source: Mapped[str] = mapped_column(String(20), nullable=False, default="sms", server_default="sms")
+    # The user's own explicit category choice (e.g. from a receipt photo's
+    # caption) — not a guess. app.agent trusts this over the model's own
+    # suggested_category when set; see app/agent.py:_apply_category_hint.
+    category_hint: Mapped[str | None] = mapped_column(String(50), nullable=True)
     # 'pending' | 'processed' — not in the original brief; needed so the agent
     # loop and /reconcile can find unprocessed rows without a fragile join.
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", server_default="pending")
