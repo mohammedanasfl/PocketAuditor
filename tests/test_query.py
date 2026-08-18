@@ -290,6 +290,35 @@ async def test_run_query_net_aggregation_excludes_savings_from_spend(db_session)
     assert result.net_income == Decimal("50000.00")
 
 
+async def test_run_query_net_message_calls_out_savings_transfer_explicitly(db_session):
+    """A silent exclusion looks like a bug from the outside — the message
+    must say a Savings transfer wasn't counted, not just quietly leave it
+    out, or the (correct) number reads as suspicious."""
+    user = await _make_user(db_session)
+    await _make_income(db_session, user, amount="38267.00", txn_date=date(2026, 8, 1))
+    await _make_expense(db_session, user, amount="6496.76", category="Food", txn_date=date(2026, 8, 5))
+    await _make_expense(db_session, user, amount="32000.00", category="Savings", txn_date=date(2026, 8, 3))
+
+    intent = _intent(date_range="this_month", aggregation="net")
+    result = await run_query(db_session, user.id, intent, today=date(2026, 8, 15))
+
+    assert result.net_moved_to_savings == Decimal("32000.00")
+    message = result.as_message()
+    assert "You have Rs.31,770.24 left" in message
+    assert "Rs.32,000.00 moved to savings not counted" in message
+
+
+async def test_run_query_net_message_omits_savings_note_when_none_moved(db_session):
+    user = await _make_user(db_session)
+    await _make_income(db_session, user, amount="10000.00", txn_date=date(2026, 8, 1))
+    await _make_expense(db_session, user, amount="1000.00", category="Food", txn_date=date(2026, 8, 5))
+
+    intent = _intent(date_range="this_month", aggregation="net")
+    result = await run_query(db_session, user.id, intent, today=date(2026, 8, 15))
+
+    assert "moved to savings" not in result.as_message()
+
+
 async def test_run_query_net_aggregation_ignores_category_filter(db_session):
     """A balance isn't category-scoped — even if a category slipped through,
     net must still reflect the whole ledger for the period."""

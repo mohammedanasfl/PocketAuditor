@@ -58,6 +58,7 @@ class QueryResult:
     # well-defined (even both zero), so "net" never needs the is_empty path.
     net_income: Decimal = Decimal("0")
     net_spend: Decimal = Decimal("0")
+    net_moved_to_savings: Decimal = Decimal("0")
 
     @property
     def is_empty(self) -> bool:
@@ -72,7 +73,12 @@ class QueryResult:
 
     def _net_message(self) -> str:
         net = self.net_income - self.net_spend
-        detail = f"(Rs.{self.net_income:,.2f} income − Rs.{self.net_spend:,.2f} spent)"
+        savings_note = (
+            f", Rs.{self.net_moved_to_savings:,.2f} moved to savings not counted"
+            if self.net_moved_to_savings > 0
+            else ""
+        )
+        detail = f"(Rs.{self.net_income:,.2f} income − Rs.{self.net_spend:,.2f} spent{savings_note})"
         period_phrase = self._period_phrase()
         if net >= 0:
             return f"You have Rs.{net:,.2f} left {period_phrase} {detail}."
@@ -174,7 +180,28 @@ async def _run_net_query(
             ).scalar_one()
         )
     )
-    return QueryResult(intent=intent, start=start, end=end, net_income=income_total, net_spend=spend_total)
+    moved_to_savings = Decimal(
+        str(
+            (
+                await session.execute(
+                    select(func.coalesce(func.sum(Expense.amount), 0)).where(
+                        Expense.user_id == user_id,
+                        Expense.txn_date >= start,
+                        Expense.txn_date <= end,
+                        func.lower(Expense.category) == SAVINGS_CATEGORY.lower(),
+                    )
+                )
+            ).scalar_one()
+        )
+    )
+    return QueryResult(
+        intent=intent,
+        start=start,
+        end=end,
+        net_income=income_total,
+        net_spend=spend_total,
+        net_moved_to_savings=moved_to_savings,
+    )
 
 
 async def run_query(
