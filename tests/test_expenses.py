@@ -12,8 +12,8 @@ from datetime import date
 from decimal import Decimal
 from uuid import uuid4
 
-from app.expenses import resolve_ask_user_answer
-from app.models import ReconciliationRun, Transaction, User
+from app.expenses import recategorize_expense, resolve_ask_user_answer
+from app.models import Expense, ReconciliationRun, Transaction, User
 
 
 async def _make_user(session) -> User:
@@ -82,3 +82,21 @@ async def test_unknown_run_id_returns_none(db_session):
     expense = await resolve_ask_user_answer(db_session, uuid4(), "Food")
 
     assert expense is None
+
+
+async def test_recategorize_expense_updates_category(db_session):
+    user = await _make_user(db_session)
+    expense = Expense(user_id=user.id, amount=Decimal("3000"), category="Uncategorized", txn_date=date(2026, 7, 9))
+    db_session.add(expense)
+    await db_session.commit()
+
+    updated = await recategorize_expense(db_session, expense.id, "Shopping")
+
+    assert updated is not None
+    assert updated.category == "Shopping"
+    await db_session.refresh(expense)
+    assert expense.category == "Shopping"
+
+
+async def test_recategorize_missing_expense_returns_none(db_session):
+    assert await recategorize_expense(db_session, uuid4(), "Food") is None

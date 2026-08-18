@@ -11,15 +11,18 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from app.agent import reconcile_user
+from app.audit import run_monthly_audit
 from app.budgets import format_budgets_message, get_budget_statuses, upsert_budget
 from app.categories import CATEGORIES, normalize_category
 from app.db import SessionLocal
 from app.expenses import log_manual_expense
+from app.income import get_income_summary
 from app.llm.base import LLMDecisionError
 from app.query import run_query
 from app.reports import get_spend_summary
+from app.salary import format_salary_profile, get_salary_profile, upsert_salary_profile
 from app.telegram.handlers._shared import _get_or_create_user
-from app.telegram.handlers.callbacks import send_ask_user_message
+from app.telegram.handlers.callbacks import send_ask_user_message, send_audit_question
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +45,10 @@ _WELCOME_TEXT = (
     "/start — show this message\n"
     "/reconcile — reconcile your pending transactions\n"
     "/spend — see your spend totals for this week, month, year, and all time\n"
+    "/income — see your income totals (from forwarded credit/salary SMS)\n"
+    "/salary <expected> [savings_target] [payday] — set your expected monthly "
+    "salary so I can audit it, e.g. /salary 50000 10000 1\n"
+    "/audit — audit last month: income vs spend, savings, and AI recommendations\n"
     "/log <category> <amount> [notes] — manually log cash or other spend with "
     "no bank alert at all, e.g. /log Food 900 lunch\n"
     "/setbudget <category> <amount> — set a monthly limit, e.g. /setbudget Food 4000\n"
@@ -76,6 +83,88 @@ async def handle_spend_command(update: Update, context: ContextTypes.DEFAULT_TYP
         summary = await get_spend_summary(session, user.id)
 
     await update.message.reply_text(summary.as_message())
+
+
+async def handle_income_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/income — income totals for this month, last month, this year, all time.
+    Reads the `incomes` ledger populated from forwarded credit SMS."""
+    if update.message is None:
+        return
+    chat_id = update.effective_chat.id
+    logger.info("chat=%s: /income", chat_id)
+
+    async with SessionLocal() as session:
+        user = await _get_or_create_user(session, chat_id)
+        summary = await get_income_summary(session, user.id)
+
+    await update.message.reply_text(summary.as_message())
+
+
+async def handle_salary_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/salary <expected> [savings_target] [payday] — set expected monthly
+    salary, an optional monthly savings target, and an optional payday
+    (day-of-month). With no arguments, shows the current profile.
+
+    Grounds the monthly audit and the mid-month "salary late" / "spending
+    pace" alerts — without an expected figure there's nothing to compare
+    against."""
+    if update.message is None:
+        return
+    chat_id = update.effective_chat.id
+    args = context.args or []
+    logger.info("chat=%s: /salary %r", chat_id, args)
+
+    usage = (
+        "Usage: /salary <expected> [savings_target] [payday]\n"
+        "e.g. /salary 50000 10000 1  (expect Rs.50,000, save Rs.10,000/month, paid on the 1st)"
+    )
+
+    if not args:
+        async with SessionLocal() as session:
+            user = await _get_or_create_user(session, chat_id)
+            profile = await get_salary_profile(session, user.id)
+        message = format_salary_profile(profile)
+        await update.message.reply_text(message if profile is not None else f"{message}\n\n{usage}")
+        return
+
+    try:
+        expected = Decimal(args[0])
+    except InvalidOperation:
+        await update.message.reply_text(usage)
+        return
+    if expected <= 0:
+        await update.message.reply_text("Expected salary must be positive.")
+        return
+
+    savings_target: Decimal | None = None
+    if len(args) >= 2:
+        try:
+            savings_target = Decimal(args[1])
+        except InvalidOperation:
+            await update.message.reply_text(usage)
+            return
+        if savings_target < 0 or savings_target > expected:
+            await update.message.reply_text("Savings target must be between 0 and your expected salary.")
+            return
+
+    payday_day: int | None = None
+    if len(args) >= 3:
+        try:
+            payday_day = int(args[2])
+        except ValueError:
+            await update.message.reply_text(usage)
+            return
+        if not 1 <= payday_day <= 28:
+            await update.message.reply_text("Payday must be a day of the month between 1 and 28.")
+            return
+
+    async with SessionLocal() as session:
+        user = await _get_or_create_user(session, chat_id)
+        profile = await upsert_salary_profile(
+            session, user.id, expected_salary=expected, savings_target=savings_target, payday_day=payday_day
+        )
+
+    await update.message.reply_text("✅ Salary profile saved.\n" + format_salary_profile(profile))
 
 
 async def handle_setbudget_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -217,6 +306,34 @@ async def handle_ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         result = await run_query(session, user.id, intent)
 
     await update.message.reply_text(result.as_message())
+
+
+async def handle_audit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/audit — run the monthly salary audit for the requesting chat's user
+    over the previous completed month, on demand (the same audit the
+    1st-of-month cron runs for everyone). Idempotent per month, so a repeat
+    call just recaps the already-computed result."""
+    chat_id = update.effective_chat.id
+    provider = context.bot_data["llm_provider"]
+    logger.info("chat=%s: /audit requested", chat_id)
+
+    async with SessionLocal() as session:
+        user = await _get_or_create_user(session, chat_id)
+        result = await run_monthly_audit(session, provider, user.id)
+
+    logger.info("chat=%s: audit finished — status=%s questions=%d", chat_id, result.status, len(result.questions))
+
+    if result.status == "no_data":
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"Nothing to audit for {result.period_label} yet — no income or spending recorded.",
+        )
+        return
+
+    if result.message:
+        await context.bot.send_message(chat_id=chat_id, text=result.message)
+    for question in result.questions:
+        await send_audit_question(context.bot, chat_id, question)
 
 
 async def handle_reconcile_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

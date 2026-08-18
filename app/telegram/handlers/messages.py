@@ -43,8 +43,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
-    if result.outcome == "not_debit":
-        await update.message.reply_text(f"Looks like a credit of Rs.{result.amount} — not tracked as an expense.")
+    if result.outcome == "income_recorded":
+        source_note = f" from {result.merchant}" if result.merchant else ""
+        await update.message.reply_text(
+            f"💵 Income of Rs.{result.amount}{source_note} recorded. I'll factor it into your monthly audit."
+        )
         return
 
     await update.message.reply_text(

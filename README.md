@@ -31,6 +31,13 @@ natural-language query over your expense ledger, via a constrained query
 intent the LLM fills in — never raw SQL — see
 [NL query chat](#nl-query-chat-phase-3b) below.
 
+Phase 4 turns the bot into a **personal salary auditor**: forwarded credit SMS
+are now captured as income (`/income`), you can register your expected salary
+(`/salary`), and a monthly AI audit (`/audit`, plus a 1st-of-month cron) reports
+income vs. spend vs. savings with LLM-written recommendations, asks you to
+categorize anomalies, and — mid-month — warns you if salary is late or your
+spending pace is too high. See [Salary audit](#salary-audit-phase-4) below.
+
 ## Architecture at a glance
 
 ```
@@ -38,11 +45,14 @@ app/
   config.py, db.py, models.py, schemas.py   settings, DB, ORM models, Pydantic schemas
   llm/          LLMProvider Protocol + Ollama/Claude/Gemini providers + factory
   parser.py     regex-first SMS parser, LLM fallback for ambiguous messages
-  agent.py      perceive -> compare -> decide -> act loop
+  agent.py      perceive -> compare -> decide -> act loop (per-transaction reconcile)
+  audit.py      monthly salary-audit agent + deterministic mid-month alerts
+  income.py     the incomes ledger (money-in) + /income summary
+  salary.py     the per-user salary profile (/salary)
   budgets.py    deterministic budget-threshold alerts — no LLM involved
   query.py      QueryIntent -> parameterized SQLAlchemy query -> phrased answer
-  telegram/     bot handlers (SMS text, photo receipts, /reconcile, /log, /setbudget, /budgets, /ask, category callback)
-  main.py       FastAPI app: /telegram/webhook, /reconcile, /check-budgets, /health
+  telegram/     bot handlers (SMS text, photo receipts, /reconcile, /log, /income, /salary, /audit, /setbudget, /budgets, /ask, category + audit callbacks)
+  main.py       FastAPI app: /telegram/webhook, /reconcile, /check-budgets, /run-audit, /check-salary-alerts, /health
 alembic/        migrations
 tests/          pytest suite (all offline — no live Ollama/Telegram/DB needed)
 ```
@@ -236,6 +246,62 @@ user, and `check_budget_alerts` itself guarantees at most one alert per
 category per calendar month (via `budget_alerts_sent`), so running this daily
 doesn't mean daily *nagging* — just a daily *check*.
 
+### Monthly cron for the salary audit (GitHub Actions)
+
+Runs on the 1st of each month and audits the **previous completed** month, so
+the whole month's income and spending is in before it's judged.
+
+```yaml
+# .github/workflows/run-audit.yml
+name: Monthly salary audit
+on:
+  schedule:
+    - cron: "0 3 1 * *"   # 1st of the month, 03:00 UTC
+  workflow_dispatch: {}
+jobs:
+  run-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger monthly audit
+        run: |
+          curl -X POST "${{ secrets.APP_URL }}/run-audit" \
+            -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" -f
+```
+
+Same `202`-and-background-task shape as `/reconcile`. `run_monthly_audit` is
+idempotent per month (the `(user_id, period_month)` row in `audit_runs` is
+both the trail and the once-per-month guard), so a re-run — or the on-demand
+`/audit` command — never double-audits.
+
+### Daily cron for mid-month salary alerts (GitHub Actions)
+
+Proactive within-the-month warnings (salary late, spending pace too high) are
+checked **daily**, same reasoning as budget alerts — a "salary hasn't arrived"
+or "you're on track to overspend" heads-up is only useful while there's still
+month left to act on it.
+
+```yaml
+# .github/workflows/check-salary-alerts.yml
+name: Daily salary alerts
+on:
+  schedule:
+    - cron: "0 3 * * *"   # every day, 03:00 UTC
+  workflow_dispatch: {}
+jobs:
+  check-salary-alerts:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger salary-alert check
+        run: |
+          curl -X POST "${{ secrets.APP_URL }}/check-salary-alerts" \
+            -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" -f
+```
+
+`check_midmonth_alerts` dedups via `audit_alerts_sent` (at most one of each
+alert type per calendar month), so daily checking doesn't mean daily nagging.
+Both endpoints are gated by the same `CRON_SECRET` as `/reconcile` and
+`/check-budgets`.
+
 ### Keep-alive ping (Render + Neon free tier)
 
 `GET /health` returns `200` without touching the database, so a keep-alive
@@ -248,9 +314,9 @@ possibly-suspended Neon compute to wake up.
 ## Choosing an LLM provider
 
 Three interchangeable `LLMProvider` implementations exist (`app/llm/ollama.py`,
-`app/llm/claude.py`, `app/llm/gemini.py`) — all four methods
-(`decide_match`, `parse_transaction`, `extract_receipt`, `interpret_query`),
-same structured-output contract, swap with one `.env` line.
+`app/llm/claude.py`, `app/llm/gemini.py`) — all five methods
+(`decide_match`, `parse_transaction`, `extract_receipt`, `interpret_query`,
+`audit_finances`), same structured-output contract, swap with one `.env` line.
 
 | | `LLM_PROVIDER=ollama` | `LLM_PROVIDER=claude` | `LLM_PROVIDER=gemini` |
 |---|---|---|---|
@@ -431,6 +497,62 @@ rather than trusting the model's own arithmetic.
 
 ---
 
+## Salary audit (Phase 4)
+
+Phase 1–3 only ever tracked money *out*. Phase 4 adds the money-*in* side and a
+monthly auditor on top of it.
+
+**Income capture.** A forwarded **credit** SMS used to be discarded; it's now
+parsed (the parser already reads direction and the counterparty/employer name)
+and written to a separate `incomes` ledger via `app/income.py:record_income`.
+Income is deliberately **not** an expense: it never becomes a `transactions`
+row, never enters `reconcile_user`, and never counts toward `/spend` or budgets
+(both of which sum `expenses`). `/income` shows income totals for this month,
+last month, this year, and all time.
+
+**Salary profile.** `/salary <expected> [savings_target] [payday]` (e.g.
+`/salary 50000 10000 1`) records what you expect to earn, an optional monthly
+savings target, and an optional payday (day-of-month). This is what grounds the
+"was salary received / on time" finding and the mid-month alerts — without an
+expected figure there's nothing to compare actual income against. `/salary`
+with no arguments shows the current profile.
+
+**The monthly audit — an AI agent, structured like `reconcile_user`.**
+`/audit` (and the 1st-of-month cron) runs `app/audit.py:run_monthly_audit` over
+the previous completed month: perceive (load the month's income, spend,
+previous month for deltas, budgets, salary profile) → compute a deterministic
+`FinancialSnapshot` (totals, savings rate, per-category month-over-month deltas,
+whether salary landed, and a shortlist of anomaly candidates) → decide
+(`provider.audit_finances(snapshot)`) → act (send the report, ask about
+anomalies).
+
+The load-bearing rule from `/ask` and `_apply_guard` holds here too: **every
+number is computed in code; the LLM only writes prose.** The model receives the
+pre-computed snapshot and returns *only* a summary, recommendations, and which
+of the offered anomaly candidates to flag — never a figure. `_apply_audit_guard`
+then drops any flagged expense id that wasn't in the shortlist we offered (the
+same hallucination check `_apply_guard` applies to a match's expense id). If the
+LLM call fails, the numbers still go out on their own — same resilience as the
+parser falling back to its regex result.
+
+Flagged anomalies (e.g. an expense left `Uncategorized`, or an unusually large
+one) become inline-button questions via a distinct `acat:` callback that
+recategorizes the *existing* expense in place — separate from reconcile's `cat:`
+flow, which *creates* an expense from a pending transaction.
+
+**Proactive mid-month alerts.** `check_midmonth_alerts` (daily cron,
+deterministic — no LLM) fires at most once each per month: `salary_late` (payday
++ grace has passed and no credit matching the expected salary has arrived) and
+`pace_high` (month-to-date spend, projected to month-end, exceeds the
+income-minus-savings-target ceiling). Dedup is via `audit_alerts_sent`, the same
+insert-before-send guard budgets use.
+
+See [Monthly cron for the salary audit](#monthly-cron-for-the-salary-audit-github-actions)
+and [Daily cron for mid-month salary alerts](#daily-cron-for-mid-month-salary-alerts-github-actions)
+for the schedules.
+
+---
+
 ## Testing
 
 ```bash
@@ -445,14 +567,15 @@ tests themselves never connect to Postgres or Telegram). This is CI only —
 Render keeps deploying on every push to `main` exactly as it already did;
 this workflow doesn't gate that.
 
-137 tests, all offline (mocked HTTP/API calls, aiosqlite for DB tests) — no
+217 tests, all offline (mocked HTTP/API calls, aiosqlite for DB tests) — no
 live Ollama, Telegram, Neon, or Gemini/Claude connection required. Covers:
 
 - **Provider parity** (`tests/test_llm_providers.py`,
-  `tests/test_agent_provider_parity.py`) — identical mocked model output run
-  through `OllamaProvider`, `ClaudeProvider`, and `GeminiProvider` (and
-  through the full agent loop) produces byte-for-byte equal results across
-  all three, for every method including `interpret_query`.
+  `tests/test_agent_provider_parity.py`, `tests/test_audit_provider_parity.py`)
+  — identical mocked model output run through `OllamaProvider`,
+  `ClaudeProvider`, and `GeminiProvider` (and through the full agent and audit
+  loops) produces byte-for-byte equal results across all three, for every
+  method including `interpret_query` and `audit_finances`.
   `test_llm_providers.py` also covers `extract_receipt` (a clear receipt, a
   blurry one, a non-receipt image — all assert on `readable` rather than a
   hallucinated total) and that an Ollama-side HTTP failure (e.g. a
@@ -492,8 +615,23 @@ live Ollama, Telegram, Neon, or Gemini/Claude connection required. Covers:
   no-results guardrail, the `interpret_query`-failure fallback, usage-on-empty
   question, and that `run_query` only ever receives the validated
   `QueryIntent` object, never the raw question text.
-- **FastAPI wiring** (`tests/test_main.py`) — webhook secret check,
-  `/reconcile` and `/check-budgets` background-task scheduling, `/health`.
+- **Income & salary** (`tests/test_income.py`, `tests/test_salary.py`,
+  `tests/test_ingestion.py`) — a credit SMS now records an `Income` row (never
+  a transaction), income summary bucketing, salary-profile upsert/validation.
+- **Salary audit** (`tests/test_audit.py`) — snapshot totals/savings-rate,
+  salary-received detection, category deltas, anomaly-candidate selection, the
+  hallucination guard, monthly idempotency, numbers-still-report-when-LLM-fails,
+  and the salary/savings-target report lines.
+- **Mid-month alerts** (`tests/test_midmonth_alerts.py`) — `salary_late` and
+  `pace_high` firing conditions, the grace period, the early-month pace
+  suppression, and once-per-month dedup.
+- **Audit commands/callbacks** (`tests/test_telegram_audit_handler.py`,
+  `tests/test_audit_callback.py`, `tests/test_telegram_income_handler.py`,
+  `tests/test_telegram_salary_handler.py`) — `/audit` report + anomaly
+  questions, the `acat:` recategorize round trip, `/income`, `/salary`.
+- **FastAPI wiring** (`tests/test_main.py`) — webhook secret check, and
+  `/reconcile`, `/check-budgets`, `/run-audit`, `/check-salary-alerts`
+  background-task scheduling (each fail-closed on `CRON_SECRET`), `/health`.
 
 To sanity-check the provider abstraction against a **real** model (not
 mocks — this is what actually proves the abstraction holds, since the unit
@@ -515,9 +653,17 @@ without `--both` — `get_provider()` picks it up like any other provider.)
 
 Per the Phase 1/2/3 briefs: no voice transcription, no line-item-level
 categorization of a receipt's individual items (the whole receipt is one
-transaction), no multi-photo/multi-page receipt stitching, no
-predictive/forecasting budget features ("will I go over budget?"), no
-spending recommendations or coaching tone — the bot reports facts, it
-doesn't lecture. `ask_user` is a single question with inline buttons, and
-`/ask` is a single self-contained question — neither is a multi-turn
-dialogue; asking a follow-up starts over rather than being remembered.
+transaction), no multi-photo/multi-page receipt stitching. `ask_user` is a
+single question with inline buttons, and `/ask` is a single self-contained
+question — neither is a multi-turn dialogue; asking a follow-up starts over
+rather than being remembered.
+
+Phase 4 does add the two things earlier phases deliberately avoided —
+forecasting (the mid-month `pace_high` alert projects month-end spend) and
+recommendations (the monthly audit's LLM-written advice) — but only inside the
+salary audit, and always grounded in figures computed in code (the LLM never
+produces a number). Still out of scope for Phase 4: multi-currency, running the
+income side through a reconcile/matching loop (credits are recorded directly),
+auto-setting budgets from spend, a savings *goal* tracker beyond the single
+monthly `savings_target`, and back-filling credits that were discarded before
+this phase existed.

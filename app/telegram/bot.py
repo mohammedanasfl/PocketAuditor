@@ -12,13 +12,17 @@ from app.config import settings
 from app.llm.factory import get_provider
 from app.telegram.handlers import (
     handle_ask_command,
+    handle_audit_category_callback,
+    handle_audit_command,
     handle_budgets_command,
     handle_category_callback,
     handle_help_command,
+    handle_income_command,
     handle_log_command,
     handle_message,
     handle_photo_message,
     handle_reconcile_command,
+    handle_salary_command,
     handle_setbudget_command,
     handle_spend_command,
     handle_start_command,
@@ -31,6 +35,9 @@ BOT_COMMANDS = [
     BotCommand("help", "Show the welcome message and command list"),
     BotCommand("reconcile", "Reconcile your pending transactions"),
     BotCommand("spend", "See your spend totals (week/month/year/all-time)"),
+    BotCommand("income", "See your income totals from forwarded credit/salary SMS"),
+    BotCommand("salary", "Set expected monthly salary, e.g. /salary 50000 10000 1"),
+    BotCommand("audit", "Audit last month: income vs spend, savings, AI advice"),
     BotCommand("log", "Manually log cash/other spend, e.g. /log Food 900"),
     BotCommand("setbudget", "Set a monthly limit, e.g. /setbudget Food 4000"),
     BotCommand("budgets", "See your limits and this month's spend per category"),
@@ -45,11 +52,15 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("help", handle_help_command))
     application.add_handler(CommandHandler("reconcile", handle_reconcile_command))
     application.add_handler(CommandHandler("spend", handle_spend_command))
+    application.add_handler(CommandHandler("income", handle_income_command))
+    application.add_handler(CommandHandler("salary", handle_salary_command))
+    application.add_handler(CommandHandler("audit", handle_audit_command))
     application.add_handler(CommandHandler("log", handle_log_command))
     application.add_handler(CommandHandler("setbudget", handle_setbudget_command))
     application.add_handler(CommandHandler("budgets", handle_budgets_command))
     application.add_handler(CommandHandler("ask", handle_ask_command))
     application.add_handler(CallbackQueryHandler(handle_category_callback, pattern=r"^cat:"))
+    application.add_handler(CallbackQueryHandler(handle_audit_category_callback, pattern=r"^acat:"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))
     return application

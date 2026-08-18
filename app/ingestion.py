@@ -19,6 +19,7 @@ from typing import Literal
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.categories import normalize_category
+from app.income import record_income
 from app.llm.base import LLMDecisionError, LLMProvider
 from app.models import Transaction, User
 from app.parser import ParseError, parse_sms
@@ -28,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class SmsIngestResult:
-    outcome: Literal["transaction_created", "not_debit", "parse_error"]
+    outcome: Literal["transaction_created", "income_recorded", "parse_error"]
     amount: Decimal | None = None
     merchant: str | None = None
     txn_date: date | None = None
@@ -44,8 +45,22 @@ async def ingest_sms_transaction(
         return SmsIngestResult(outcome="parse_error")
 
     if not parsed.is_debit:
-        logger.info("user=%s: skipped credit of Rs.%s (not tracked as an expense)", user.id, parsed.amount)
-        return SmsIngestResult(outcome="not_debit", amount=parsed.amount)
+        # Money-in: record it in the incomes ledger for the monthly salary
+        # audit rather than dropping it. Credits never enter the transactions/
+        # reconcile loop — see app/income.py.
+        await record_income(
+            session,
+            user.id,
+            amount=parsed.amount,
+            source=parsed.merchant,
+            txn_date=parsed.txn_date,
+            raw_text=raw_text,
+            created_via="auto",
+        )
+        logger.info("user=%s: recorded income of Rs.%s from %r", user.id, parsed.amount, parsed.merchant)
+        return SmsIngestResult(
+            outcome="income_recorded", amount=parsed.amount, merchant=parsed.merchant, txn_date=parsed.txn_date
+        )
 
     txn = Transaction(
         user_id=user.id,

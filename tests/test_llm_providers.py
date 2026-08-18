@@ -19,13 +19,22 @@ from app.llm.base import LLMDecisionError, sanitize_schema_for_llm
 from app.llm.claude import ClaudeProvider
 from app.llm.gemini import GeminiProvider
 from app.llm.ollama import OllamaProvider
-from app.schemas import MatchDecision, QueryIntent
+from app.schemas import AuditReport, MatchDecision, QueryIntent
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
 
 TRANSACTION = {"amount": "450.00", "merchant": "Blinkit", "txn_date": "2026-08-10"}
 CANDIDATE_ID = str(uuid.uuid4())
 CANDIDATES = [{"id": CANDIDATE_ID, "amount": "450.00", "merchant": "Blinkit", "txn_date": "2026-08-10"}]
+ANOMALY_ID = str(uuid.uuid4())
+SNAPSHOT = {
+    "period": "July 2026",
+    "total_income": "50000.00",
+    "total_spend": "38000.00",
+    "net_saved": "12000.00",
+    "savings_rate_pct": "24.00",
+    "anomaly_candidates": [{"id": ANOMALY_ID, "amount": "9000.00", "merchant": "unknown", "category": "Uncategorized"}],
+}
 
 # Stand-in bytes for a photo — extract_receipt tests mock the API response
 # directly (same pattern as decide_match/parse_transaction above), so these
@@ -90,6 +99,17 @@ def _query_intent_json(
             "custom_end": None,
             "aggregation": aggregation,
             "intent_summary": "How much was spent on food this week.",
+        }
+    )
+
+
+def _audit_report_json(flagged: list[str] | None = None) -> str:
+    return json.dumps(
+        {
+            "summary": "You saved a healthy share of your income, though Food spending rose noticeably.",
+            "recommendations": ["Consider setting a Food budget.", "Keep the savings momentum going."],
+            "flagged_expense_ids": flagged if flagged is not None else [],
+            "confidence": 0.88,
         }
     )
 
@@ -478,3 +498,91 @@ async def test_interpret_query_identical_across_providers(monkeypatch):
 
     assert ollama_intent == claude_intent == gemini_intent
     assert isinstance(ollama_intent, QueryIntent)
+
+
+# --- audit_finances (Phase 4) -----------------------------------------------
+
+
+@respx.mock
+async def test_ollama_audit_finances_valid_response():
+    respx.post(OLLAMA_URL).mock(
+        return_value=Response(200, json={"message": {"content": _audit_report_json([ANOMALY_ID])}})
+    )
+    provider = OllamaProvider(base_url="http://localhost:11434", model="qwen2.5:7b")
+    report = await provider.audit_finances(SNAPSHOT)
+    assert len(report.recommendations) == 2
+    assert [str(i) for i in report.flagged_expense_ids] == [ANOMALY_ID]
+    assert report.confidence == pytest.approx(0.88)
+
+
+@respx.mock
+async def test_ollama_audit_finances_retries_then_succeeds():
+    route = respx.post(OLLAMA_URL).mock(
+        side_effect=[
+            Response(200, json={"message": {"content": "not valid json"}}),
+            Response(200, json={"message": {"content": _audit_report_json()}}),
+        ]
+    )
+    provider = OllamaProvider(base_url="http://localhost:11434", model="qwen2.5:7b")
+    report = await provider.audit_finances(SNAPSHOT)
+    assert report.flagged_expense_ids == []
+    assert route.call_count == 2
+
+
+@respx.mock
+async def test_ollama_audit_finances_raises_after_exhausting_retries():
+    route = respx.post(OLLAMA_URL).mock(return_value=Response(200, json={"message": {"content": "not valid json"}}))
+    provider = OllamaProvider(base_url="http://localhost:11434", model="qwen2.5:7b")
+    with pytest.raises(LLMDecisionError):
+        await provider.audit_finances(SNAPSHOT)
+    assert route.call_count == 2
+
+
+async def test_claude_audit_finances_valid_response(monkeypatch):
+    provider = ClaudeProvider(api_key="test-key", model="claude-sonnet-5")
+    monkeypatch.setattr(provider._client.messages, "create", _fake_claude_create(_audit_report_json([ANOMALY_ID])))
+    report = await provider.audit_finances(SNAPSHOT)
+    assert [str(i) for i in report.flagged_expense_ids] == [ANOMALY_ID]
+
+
+async def test_claude_audit_finances_invalid_response_raises(monkeypatch):
+    provider = ClaudeProvider(api_key="test-key", model="claude-sonnet-5")
+    monkeypatch.setattr(provider._client.messages, "create", _fake_claude_create("not json"))
+    with pytest.raises(LLMDecisionError):
+        await provider.audit_finances(SNAPSHOT)
+
+
+async def test_gemini_audit_finances_valid_response(monkeypatch):
+    provider = GeminiProvider(api_key="test-key", model="gemini-flash-lite-latest")
+    monkeypatch.setattr(
+        provider._client.aio.models, "generate_content", _fake_gemini_generate(_audit_report_json([ANOMALY_ID]))
+    )
+    report = await provider.audit_finances(SNAPSHOT)
+    assert [str(i) for i in report.flagged_expense_ids] == [ANOMALY_ID]
+
+
+async def test_gemini_audit_finances_invalid_response_raises(monkeypatch):
+    provider = GeminiProvider(api_key="test-key", model="gemini-flash-lite-latest")
+    monkeypatch.setattr(provider._client.aio.models, "generate_content", _fake_gemini_generate("not json"))
+    with pytest.raises(LLMDecisionError):
+        await provider.audit_finances(SNAPSHOT)
+
+
+@respx.mock
+async def test_audit_finances_identical_across_providers(monkeypatch):
+    report_json = _audit_report_json([ANOMALY_ID])
+
+    respx.post(OLLAMA_URL).mock(return_value=Response(200, json={"message": {"content": report_json}}))
+    ollama = OllamaProvider(base_url="http://localhost:11434", model="qwen2.5:7b")
+    ollama_report = await ollama.audit_finances(SNAPSHOT)
+
+    claude = ClaudeProvider(api_key="test-key", model="claude-sonnet-5")
+    monkeypatch.setattr(claude._client.messages, "create", _fake_claude_create(report_json))
+    claude_report = await claude.audit_finances(SNAPSHOT)
+
+    gemini = GeminiProvider(api_key="test-key", model="gemini-flash-lite-latest")
+    monkeypatch.setattr(gemini._client.aio.models, "generate_content", _fake_gemini_generate(report_json))
+    gemini_report = await gemini.audit_finances(SNAPSHOT)
+
+    assert ollama_report == claude_report == gemini_report
+    assert isinstance(ollama_report, AuditReport)

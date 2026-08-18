@@ -13,15 +13,17 @@ from pydantic import ValidationError
 from app.config import settings
 from app.llm.base import LLMDecisionError, sanitize_schema_for_llm
 from app.llm.prompts import (
+    AUDIT_SYSTEM,
     DECIDE_SYSTEM,
     EXTRACT_RECEIPT_SYSTEM,
     INTERPRET_QUERY_SYSTEM,
     PARSE_SYSTEM,
+    build_audit_payload,
     build_decide_payload,
     build_interpret_query_payload,
     build_parse_payload,
 )
-from app.schemas import ExtractedReceipt, LLMExtraction, MatchDecision, QueryIntent
+from app.schemas import AuditReport, ExtractedReceipt, LLMExtraction, MatchDecision, QueryIntent
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +114,23 @@ class ClaudeProvider:
             receipt.total_amount,
         )
         return receipt
+
+    async def audit_finances(self, snapshot: dict) -> AuditReport:
+        logger.info("Claude.audit_finances: model=%s", self._model)
+        payload = build_audit_payload(snapshot)
+        content = await self._create_json(AUDIT_SYSTEM, payload, AuditReport.model_json_schema())
+        try:
+            report = AuditReport.model_validate_json(content)
+        except (ValidationError, json.JSONDecodeError) as exc:
+            logger.warning("Claude.audit_finances: invalid response: %s", exc)
+            raise LLMDecisionError(f"Claude returned an invalid AuditReport: {exc}") from exc
+        logger.info(
+            "Claude.audit_finances: recommendations=%d flagged=%d confidence=%.2f",
+            len(report.recommendations),
+            len(report.flagged_expense_ids),
+            report.confidence,
+        )
+        return report
 
     async def interpret_query(self, question: str) -> QueryIntent:
         logger.info("Claude.interpret_query: model=%s", self._model)
