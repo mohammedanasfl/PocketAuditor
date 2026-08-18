@@ -95,6 +95,19 @@ async def test_pace_high_does_not_fire_when_on_track(db_session):
     assert await check_midmonth_alerts(db_session, user.id, today=TODAY) == []
 
 
+async def test_pace_high_ignores_savings_transfers(db_session):
+    """A large deliberate transfer to savings must not look like overspending —
+    it's excluded from month-to-date spend the same way it's excluded from
+    the monthly audit's total_spend."""
+    user = await _make_user(db_session)
+    await _profile(db_session, user, expected="50000", savings="10000")  # ceiling 40000
+    await _spend(db_session, user, "10000")  # real spend: projected 15,500, on track
+    db_session.add(Expense(user_id=user.id, amount=Decimal("30000"), category="Savings", txn_date=date(2026, 8, 5)))
+    await db_session.commit()
+
+    assert await check_midmonth_alerts(db_session, user.id, today=TODAY) == []
+
+
 async def test_pace_high_suppressed_too_early_in_month(db_session):
     user = await _make_user(db_session)
     await _profile(db_session, user, expected="50000", savings="10000")

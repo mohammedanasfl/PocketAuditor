@@ -82,6 +82,30 @@ async def test_spend_summary_scopes_to_the_requesting_user(db_session):
     assert summary.total == Decimal("100.00")
 
 
+async def test_spend_summary_excludes_savings_category(db_session):
+    """Money moved to another account to save it isn't spent — /spend should
+    not count it, regardless of period."""
+    user = await _make_user(db_session)
+    await _make_expense(db_session, user, amount="100.00", txn_date=date.today())
+    expense = Expense(user_id=user.id, amount=Decimal("5000.00"), category="Savings", txn_date=date.today())
+    db_session.add(expense)
+    await db_session.commit()
+
+    summary = await get_spend_summary(db_session, user.id)
+
+    assert summary.week == Decimal("100.00")
+    assert summary.total == Decimal("100.00")
+
+
+async def test_spend_summary_excludes_savings_case_insensitively(db_session):
+    user = await _make_user(db_session)
+    db_session.add(Expense(user_id=user.id, amount=Decimal("1000.00"), category="savings", txn_date=date.today()))
+    await db_session.commit()
+
+    summary = await get_spend_summary(db_session, user.id)
+    assert summary.total == Decimal("0")
+
+
 def test_as_message_formats_all_four_periods():
     from app.reports import SpendSummary
 

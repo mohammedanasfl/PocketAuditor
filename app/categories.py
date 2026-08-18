@@ -15,8 +15,20 @@ CATEGORIES: dict[str, str] = {
     "bills": "Bills",
     "health": "Health",
     "entertainment": "Entertainment",
+    "savings": "Savings",
     "other": "Other",
 }
+
+# Money moved to another account to save it (a self-transfer) rather than
+# actually spent — /reports.py's /spend and app/audit.py's monthly audit both
+# exclude this category from spend totals, since the money isn't gone, just
+# relocated. See is_savings_category().
+SAVINGS_CATEGORY = "Savings"
+
+
+def is_savings_category(category: str) -> bool:
+    """Case-insensitive check for the dedicated Savings category."""
+    return category.strip().lower() == SAVINGS_CATEGORY.lower()
 
 
 def normalize_category(raw: str) -> str | None:

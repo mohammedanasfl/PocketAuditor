@@ -11,6 +11,12 @@ to flag. _apply_audit_guard then re-checks those ids against the offered set in
 code, discarding any the model invented — the same hallucination guard
 _apply_guard applies to a match's expense id.
 
+The Savings category (app.categories.SAVINGS_CATEGORY) is money moved to
+another account, not actually spent — it's excluded from total_spend (and from
+the mid-month pace projection) everywhere in this module and tracked instead
+as moved_to_savings, so a self-transfer to savings raises your effective
+savings rate rather than looking like overspending.
+
 Imports only app.llm.base + app.schemas (LLM side) and app.models (DB side) —
 never a concrete provider — so the provider swap and the scripted-FakeProvider
 tests stay cheap, just like app/agent.py.
@@ -29,6 +35,7 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.categories import SAVINGS_CATEGORY, is_savings_category
 from app.config import settings
 from app.llm.base import LLMDecisionError, LLMProvider
 from app.models import AuditAlertSent, AuditRun, Budget, Expense, Income, SalaryProfile
@@ -69,6 +76,7 @@ class FinancialSnapshot:
     period_label: str
     total_income: Decimal
     total_spend: Decimal
+    moved_to_savings: Decimal
     net_saved: Decimal
     savings_rate: Decimal | None
     expected_salary: Decimal | None
@@ -81,7 +89,7 @@ class FinancialSnapshot:
 
     @property
     def has_data(self) -> bool:
-        return self.total_income != 0 or self.total_spend != 0
+        return self.total_income != 0 or self.total_spend != 0 or self.moved_to_savings != 0
 
     def to_llm_dict(self) -> dict:
         """Snapshot as handed to the LLM. Ids are stringified so the model
@@ -90,6 +98,7 @@ class FinancialSnapshot:
             "period": self.period_label,
             "total_income": str(self.total_income),
             "total_spend": str(self.total_spend),
+            "moved_to_savings": str(self.moved_to_savings),
             "net_saved": str(self.net_saved),
             "savings_rate_pct": None if self.savings_rate is None else str(self.savings_rate),
             "expected_salary": None if self.expected_salary is None else str(self.expected_salary),
@@ -205,19 +214,31 @@ async def _load_month(
 def _select_anomaly_candidates(expenses: list[Expense]) -> list[dict]:
     """Expenses worth asking the user to review: anything left Uncategorized,
     plus statistical outliers (only when there are enough expenses for a median
-    to be meaningful). Capped and sorted largest-first."""
+    to be meaningful). Capped and sorted largest-first.
+
+    Savings-category expenses are excluded from the outlier baseline and from
+    ever being flagged as an outlier themselves: they're deliberately large
+    self-transfers, already correctly categorized, not an unusual spend — and
+    including them in the median would badly skew what counts as "unusual"
+    for the user's actual spending."""
     if not expenses:
         return []
 
-    median = _median([e.amount for e in expenses])
+    non_savings = [e for e in expenses if not is_savings_category(e.category)]
+    median = _median([e.amount for e in non_savings])
     outlier_floor = median * _OUTLIER_MULTIPLE
-    enough_for_outliers = len(expenses) >= _MIN_EXPENSES_FOR_OUTLIER
+    enough_for_outliers = len(non_savings) >= _MIN_EXPENSES_FOR_OUTLIER
 
     picked: list[tuple[Expense, str]] = []
     for expense in expenses:
         if expense.category.lower() == _UNCATEGORIZED.lower():
             picked.append((expense, "left uncategorized"))
-        elif enough_for_outliers and median > 0 and expense.amount >= outlier_floor:
+        elif (
+            not is_savings_category(expense.category)
+            and enough_for_outliers
+            and median > 0
+            and expense.amount >= outlier_floor
+        ):
             picked.append((expense, "unusually large versus your typical spend this month"))
 
     picked.sort(key=lambda pair: pair[0].amount, reverse=True)
@@ -246,9 +267,14 @@ def build_snapshot(
     salary_tolerance_pct: float,
 ) -> FinancialSnapshot:
     """Pure function (no I/O): turn a month's raw rows into the computed facts.
-    Kept separate from _load_month so tests can drive it directly."""
+    Kept separate from _load_month so tests can drive it directly.
+
+    Savings-category expenses are excluded from total_spend and tracked
+    separately as moved_to_savings: that money was moved to another account,
+    not spent, so counting it as spend would understate net_saved."""
     total_income = sum((i.amount for i in incomes), Decimal("0"))
-    total_spend = sum((e.amount for e in expenses), Decimal("0"))
+    total_spend = sum((e.amount for e in expenses if not is_savings_category(e.category)), Decimal("0"))
+    moved_to_savings = sum((e.amount for e in expenses if is_savings_category(e.category)), Decimal("0"))
     net_saved = total_income - total_spend
     savings_rate = (net_saved / total_income * 100).quantize(Decimal("0.01")) if total_income > 0 else None
 
@@ -281,6 +307,7 @@ def build_snapshot(
         period_label=f"{calendar.month_name[period_month.month]} {period_month.year}",
         total_income=total_income,
         total_spend=total_spend,
+        moved_to_savings=moved_to_savings,
         net_saved=net_saved,
         savings_rate=savings_rate,
         expected_salary=expected_salary,
@@ -316,6 +343,8 @@ def _format_message(snapshot: FinancialSnapshot, report: AuditReport | None) -> 
     lines = [f"🔍 Salary audit — {snapshot.period_label}"]
     lines.append(f"Income: Rs.{snapshot.total_income:,.2f}")
     lines.append(f"Spending: Rs.{snapshot.total_spend:,.2f}")
+    if snapshot.moved_to_savings > 0:
+        lines.append(f"Moved to savings: Rs.{snapshot.moved_to_savings:,.2f} (not counted as spend)")
     rate = "" if snapshot.savings_rate is None else f" ({snapshot.savings_rate:.0f}% of income)"
     verb = "saved" if snapshot.net_saved >= 0 else "overspent by"
     amount = snapshot.net_saved if snapshot.net_saved >= 0 else -snapshot.net_saved
@@ -494,7 +523,10 @@ async def check_midmonth_alerts(
             (
                 await session.execute(
                     select(func.coalesce(func.sum(Expense.amount), 0)).where(
-                        Expense.user_id == user_id, Expense.txn_date >= month_start, Expense.txn_date <= today
+                        Expense.user_id == user_id,
+                        Expense.txn_date >= month_start,
+                        Expense.txn_date <= today,
+                        func.lower(Expense.category) != SAVINGS_CATEGORY.lower(),
                     )
                 )
             ).scalar_one()

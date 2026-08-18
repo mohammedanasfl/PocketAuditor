@@ -3,7 +3,9 @@
 Reads from `expenses` — the confirmed ledger — not `transactions` (raw,
 possibly still-pending SMS parses). A transaction only counts toward spend
 once it's actually become an expense (auto_link, auto_log, or a manually
-answered ask_user).
+answered ask_user). The Savings category is excluded from every total here —
+money moved to another account to save it isn't spent, so counting it as
+spend would understate how much you actually kept.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.categories import SAVINGS_CATEGORY
 from app.models import Expense
 
 
@@ -37,7 +40,9 @@ class SpendSummary:
 
 
 async def _sum_since(session: AsyncSession, user_id: UUID, since: date | None) -> Decimal:
-    stmt = select(func.coalesce(func.sum(Expense.amount), 0)).where(Expense.user_id == user_id)
+    stmt = select(func.coalesce(func.sum(Expense.amount), 0)).where(
+        Expense.user_id == user_id, func.lower(Expense.category) != SAVINGS_CATEGORY.lower()
+    )
     if since is not None:
         stmt = stmt.where(Expense.txn_date >= since)
     total = (await session.execute(stmt)).scalar_one()

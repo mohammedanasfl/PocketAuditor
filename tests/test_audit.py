@@ -135,6 +135,73 @@ def test_snapshot_anomaly_candidates_flag_uncategorized_and_outliers():
     assert str(normal[0].id) not in ids
 
 
+# --- Savings category (money moved to another account, not actually spent) --
+
+
+def test_snapshot_excludes_savings_from_total_spend():
+    expenses = [
+        Expense(amount=Decimal("20000"), category="Food", txn_date=date(2026, 7, 5)),
+        Expense(amount=Decimal("10000"), category="Savings", txn_date=date(2026, 7, 6)),
+    ]
+    snap = build_snapshot(
+        JULY_START,
+        JULY_END,
+        [Income(amount=Decimal("50000"), txn_date=JULY_START)],
+        expenses,
+        [],
+        [],
+        None,
+        salary_tolerance_pct=0.05,
+    )
+    assert snap.total_spend == Decimal("20000")
+    assert snap.moved_to_savings == Decimal("10000")
+    # Net saved reflects that the transferred money wasn't spent, not just income - all expenses.
+    assert snap.net_saved == Decimal("30000")
+
+
+def test_snapshot_moved_to_savings_is_case_insensitive():
+    expenses = [Expense(amount=Decimal("5000"), category="savings", txn_date=date(2026, 7, 6))]
+    snap = build_snapshot(JULY_START, JULY_END, [], expenses, [], [], None, salary_tolerance_pct=0.05)
+    assert snap.total_spend == Decimal("0")
+    assert snap.moved_to_savings == Decimal("5000")
+
+
+def test_snapshot_has_data_true_for_savings_only_month():
+    expenses = [Expense(amount=Decimal("5000"), category="Savings", txn_date=date(2026, 7, 6))]
+    snap = build_snapshot(JULY_START, JULY_END, [], expenses, [], [], None, salary_tolerance_pct=0.05)
+    assert snap.has_data
+
+
+def test_anomaly_candidates_never_flag_savings_as_an_outlier():
+    # A large Savings transfer sitting among small everyday expenses must not
+    # be flagged as an "unusually large" anomaly — it's deliberate and already
+    # correctly categorized.
+    normal = [
+        Expense(id=uuid.uuid4(), amount=Decimal("100"), category="Food", txn_date=date(2026, 7, d)) for d in range(1, 6)
+    ]
+    savings_transfer = Expense(id=uuid.uuid4(), amount=Decimal("20000"), category="Savings", txn_date=date(2026, 7, 7))
+    snap = build_snapshot(
+        JULY_START, JULY_END, [], normal + [savings_transfer], [], [], None, salary_tolerance_pct=0.05
+    )
+    ids = {c["id"] for c in snap.anomaly_candidates}
+    assert str(savings_transfer.id) not in ids
+
+
+def test_anomaly_outlier_baseline_ignores_savings_amounts():
+    # Without excluding Savings from the median, a huge Savings transfer would
+    # inflate the baseline and hide a genuinely unusual Food expense.
+    normal = [
+        Expense(id=uuid.uuid4(), amount=Decimal("100"), category="Food", txn_date=date(2026, 7, d)) for d in range(1, 5)
+    ]
+    real_outlier = Expense(id=uuid.uuid4(), amount=Decimal("2000"), category="Shopping", txn_date=date(2026, 7, 6))
+    savings_transfer = Expense(id=uuid.uuid4(), amount=Decimal("50000"), category="Savings", txn_date=date(2026, 7, 7))
+    snap = build_snapshot(
+        JULY_START, JULY_END, [], normal + [real_outlier, savings_transfer], [], [], None, salary_tolerance_pct=0.05
+    )
+    ids = {c["id"] for c in snap.anomaly_candidates}
+    assert str(real_outlier.id) in ids
+
+
 # --- _apply_audit_guard ------------------------------------------------------
 
 
@@ -209,6 +276,36 @@ async def test_run_monthly_audit_flags_anomaly_as_question(db_session):
     assert len(result.questions) == 1
     assert result.questions[0].expense_id == uncategorized.id
     assert result.questions[0].current_category == "Uncategorized"
+
+
+async def test_run_monthly_audit_reports_savings_transfer_separately_from_spend(db_session):
+    user = await _make_user(db_session)
+    await _seed_july(db_session, user)  # 50000 income, 2000 Food
+    db_session.add(Expense(user_id=user.id, amount=Decimal("10000"), category="Savings", txn_date=date(2026, 7, 10)))
+    await db_session.commit()
+    provider = _ScriptedAuditProvider(_report())
+
+    result = await run_monthly_audit(db_session, provider, user.id, today=TODAY)
+
+    assert result.message is not None
+    assert "Spending: Rs.2,000.00" in result.message  # savings transfer not counted as spend
+    assert "Moved to savings: Rs.10,000.00 (not counted as spend)" in result.message
+    assert "Net saved: Rs.48,000.00" in result.message  # 50000 - 2000, not - 12000
+
+    run = (await db_session.execute(select(AuditRun).where(AuditRun.user_id == user.id))).scalar_one()
+    assert run.total_spend == Decimal("2000")
+    assert run.net_saved == Decimal("48000")
+
+
+async def test_run_monthly_audit_omits_savings_line_when_none_moved(db_session):
+    user = await _make_user(db_session)
+    await _seed_july(db_session, user)
+    provider = _ScriptedAuditProvider(_report())
+
+    result = await run_monthly_audit(db_session, provider, user.id, today=TODAY)
+
+    assert result.message is not None
+    assert "Moved to savings" not in result.message
 
 
 async def test_run_monthly_audit_guard_drops_hallucinated_flag(db_session):
