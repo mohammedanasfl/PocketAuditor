@@ -12,10 +12,11 @@ from sqlalchemy import select
 from telegram.ext import Application
 
 from app.agent import reconcile_user
+from app.audit import check_midmonth_alerts, run_monthly_audit
 from app.budgets import check_budget_alerts
 from app.db import SessionLocal
 from app.models import User
-from app.telegram.handlers import send_ask_user_message
+from app.telegram.handlers import send_ask_user_message, send_audit_question
 
 logger = logging.getLogger(__name__)
 
@@ -50,4 +51,42 @@ async def check_budgets_all_users(application: Application) -> None:
             alerts = await check_budget_alerts(session, user.id)
         for alert in alerts:
             logger.info("background check-budgets: user=%s — %s", user.id, alert.category)
+            await application.bot.send_message(chat_id=user.telegram_chat_id, text=alert.as_message())
+
+
+async def run_audit_all_users(application: Application) -> None:
+    """The monthly-cron body: run the salary audit for every known user over
+    the previous completed month. Skipped users (already audited, or no
+    activity) get no message — only a completed audit is pushed to Telegram."""
+    provider = application.bot_data["llm_provider"]
+
+    async with SessionLocal() as session:
+        users = (await session.execute(select(User))).scalars().all()
+    logger.info("background audit: %d user(s) to process", len(users))
+
+    for user in users:
+        async with SessionLocal() as session:
+            result = await run_monthly_audit(session, provider, user.id)
+        if result.status != "completed" or not result.message:
+            logger.info("background audit: user=%s — %s, no message sent", user.id, result.status)
+            continue
+        await application.bot.send_message(chat_id=user.telegram_chat_id, text=result.message)
+        for question in result.questions:
+            await send_audit_question(application.bot, user.telegram_chat_id, question)
+
+
+async def check_salary_alerts_all_users(application: Application) -> None:
+    """The daily-cron body: fire proactive mid-month salary alerts (salary
+    late / spending pace) for every known user. Same shape as
+    check_budgets_all_users; check_midmonth_alerts itself dedups so a daily
+    check doesn't mean daily nagging."""
+    async with SessionLocal() as session:
+        users = (await session.execute(select(User))).scalars().all()
+    logger.info("background check-salary-alerts: %d user(s) to process", len(users))
+
+    for user in users:
+        async with SessionLocal() as session:
+            alerts = await check_midmonth_alerts(session, user.id)
+        for alert in alerts:
+            logger.info("background check-salary-alerts: user=%s — %s", user.id, alert.alert_type)
             await application.bot.send_message(chat_id=user.telegram_chat_id, text=alert.as_message())

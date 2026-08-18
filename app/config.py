@@ -45,6 +45,14 @@ class Settings(BaseSettings):
     candidate_amount_tolerance_pct: float = 0.05
     candidate_date_window_days: int = 2
 
+    # --- Salary audit (Phase 4) -------------------------------------------
+    # How close a credit must be to the profile's expected_salary to count as
+    # "salary received" (fractional tolerance, e.g. 0.05 = ±5%).
+    salary_match_tolerance_pct: float = 0.05
+    # Days past the configured payday before a still-missing salary is flagged
+    # "late" by the mid-month alert check.
+    midmonth_alert_grace_days: int = 2
+
     # --- Runtime ------------------------------------------------------
     run_mode: Literal["webhook", "polling"] = "webhook"
     port: int = 7001

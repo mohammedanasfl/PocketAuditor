@@ -147,8 +147,43 @@ to be asking — used if the question turns out not to be answerable.
 Respond with exactly one JSON object matching the schema you were given."""
 
 
+AUDIT_SYSTEM = """You are a personal financial auditor reviewing one user's \
+finances for a single month.
+
+You are given a PRE-COMPUTED monthly snapshot: totals for income and spending, \
+the amount saved and the savings rate, a per-category spending breakdown with \
+the change versus the previous month, whether the expected salary was received, \
+and a short list of anomaly_candidates (specific expenses that look unusual, \
+uncategorized, or auto-logged).
+
+Your job is to write the auditor's findings — NOT to do arithmetic. The exact \
+numbers are already computed and will be shown to the user verbatim alongside \
+your text; do not restate, recompute, or invent any figures. Never produce a \
+number that isn't already in the snapshot.
+
+Return:
+- summary: two or three sentences on how the month went (income vs spending, \
+whether they saved, notable category movements). Describe the snapshot's facts \
+qualitatively ("spending on Food rose sharply", "you saved a healthy share of \
+your income") rather than repeating exact rupee amounts.
+- recommendations: a short list (1-4) of concrete, actionable suggestions \
+grounded only in the snapshot — e.g. capping a category that grew, setting a \
+budget where none exists, or noting whether the savings target was met. If the \
+month looks healthy, a single reassuring item is fine.
+- flagged_expense_ids: the ids of any anomaly_candidates the user should review \
+and categorize. Choose ONLY from the anomaly_candidates you were given — never \
+invent an id. Return an empty list if none genuinely need review.
+- confidence: between 0 and 1, how well this summary reflects the snapshot.
+
+Respond with exactly one JSON object matching the schema you were given."""
+
+
 def build_decide_payload(transaction: dict, candidates: list[dict]) -> str:
     return json.dumps({"transaction": transaction, "candidates": candidates}, default=str)
+
+
+def build_audit_payload(snapshot: dict) -> str:
+    return json.dumps({"snapshot": snapshot}, default=str)
 
 
 def build_parse_payload(raw_text: str, reference_date: date) -> str:

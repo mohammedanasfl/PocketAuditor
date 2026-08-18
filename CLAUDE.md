@@ -4,11 +4,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-PocketAuditor Phase 1: a Telegram bot that reconciles forwarded bank/UPI SMS
-against a manually-kept expense ledger. For each unprocessed transaction, an
-LLM-backed agent decides `auto_link` (match an existing expense), `auto_log`
-(create a new expense on its own), or `ask_user` (ask via inline buttons).
-Every decision is written to `reconciliation_runs` for audit.
+PocketAuditor: a Telegram bot that started (Phase 1) as a reconciler of
+forwarded bank/UPI SMS against a manually-kept expense ledger. For each
+unprocessed transaction, an LLM-backed agent decides `auto_link` (match an
+existing expense), `auto_log` (create a new expense on its own), or `ask_user`
+(ask via inline buttons). Every decision is written to `reconciliation_runs`
+for audit.
+
+Phase 4 adds a second, proactive side: a **personal salary auditor**. Credit
+SMS are captured as income (`incomes` ledger, `/income`), the user registers an
+expected salary (`salary_profiles`, `/salary`), and a monthly agent
+(`app/audit.py`, `/audit` + a 1st-of-month cron) reports income vs. spend vs.
+savings with LLM-written recommendations, asks about anomalies, and — mid-month,
+deterministically — warns about a late salary or a too-high spending pace. See
+"The salary audit is a second agent loop" below.
 
 ## Commands
 
@@ -65,10 +74,14 @@ Business logic lives in flat service modules alongside the pre-existing
 ones, all directly under `app/` (no `routes/`/`services/` subpackages — kept
 consistent with how `app/agent.py`/`app/budgets.py`/`app/query.py`/
 `app/reports.py`/`app/parser.py` already worked before this split):
-`app/cron.py` (the two all-users cron bodies), `app/expenses.py` (creating
-an `expenses` row directly — manual `/log`, or resolving an ask_user
-answer), `app/ingestion.py` (turning an SMS or receipt photo into a
-`transactions` row). `app/main.py` is just the FastAPI app factory +
+`app/cron.py` (the all-users cron bodies), `app/expenses.py` (creating an
+`expenses` row directly — manual `/log`, resolving an ask_user answer, or the
+audit's `recategorize_expense`), `app/ingestion.py` (turning an SMS or receipt
+photo into a `transactions` row — or, for a credit, an `incomes` row). Phase 4
+adds three more flat service modules alongside these: `app/income.py` (the
+`incomes` ledger + `/income` summary), `app/salary.py` (the per-user
+`salary_profiles` config + `/salary`), and `app/audit.py` (the monthly audit
+agent + mid-month alerts). `app/main.py` is just the FastAPI app factory +
 lifespan (Telegram `Application` startup/shutdown) + `include_router`.
 
 ### The provider boundary is load-bearing
@@ -110,9 +123,58 @@ gates whether the SMS parser calls the LLM at all) and
 `settings.confidence_threshold` (the agent's own guard, above). They are
 independent knobs — don't conflate them when tuning one.
 
+### The salary audit is a second agent loop — same conservatism, monthly grain
+
+`app/audit.py:run_monthly_audit()` is the Phase 4 analog of `reconcile_user`,
+but it runs once a month over a whole month rather than per-transaction:
+perceive (`_load_month` — the month's incomes/expenses, the previous month for
+deltas, budgets, salary profile) → compute (`build_snapshot` → a deterministic
+`FinancialSnapshot`) → decide (`provider.audit_finances(snapshot)` →
+`AuditReport`) → act (write the `audit_runs` trail, send the report + anomaly
+questions). It reuses `reconcile_user`'s exact discipline:
+
+- **The LLM writes prose, never numbers.** Every figure (income, spend, savings
+  rate, category deltas) is computed in `build_snapshot` and formatted in
+  `_format_message`. `audit_finances` gets the pre-computed snapshot and returns
+  *only* `summary`, `recommendations`, and `flagged_expense_ids` — the same
+  "anything that must be exactly right is computed, not phrased by a model"
+  rule as `app/query.py` and `_apply_guard`.
+- **`_apply_audit_guard` is the hallucination check**, mirroring `_apply_guard`:
+  it drops any `flagged_expense_id` the model returns that wasn't among the
+  `anomaly_candidates` `build_snapshot` actually offered.
+- **The LLM is best-effort for the prose.** If `audit_finances` raises
+  `LLMDecisionError`, the numbers still go out (report with no summary) — same
+  resilience as `parse_sms` falling back to its regex result.
+- **`audit_runs` is both the trail and the monthly idempotency guard.** Its
+  unique `(user_id, period_month)` index means a re-run (or the on-demand
+  `/audit` command hitting the same month) returns `already_audited` without a
+  second LLM call — the same insert-guards-the-send shape as `budget_alerts_sent`.
+
+Income is a *separate concern from expenses on purpose*: a credit SMS is written
+straight to the `incomes` ledger in `app/ingestion.py` (not a `transactions`
+row) and never enters `reconcile_user` — there's no manual income ledger to
+reconcile it against. `/spend` and budgets sum `expenses` only, so income never
+leaks into them.
+
+The anomaly ask-flow reuses the inline-button machinery but with a **distinct
+`acat:` callback** (`handle_audit_category_callback`) separate from reconcile's
+`cat:` (`handle_category_callback`): `acat:` *recategorizes an existing expense*
+in place (`expenses.recategorize_expense`), whereas `cat:` *creates* an expense
+from a pending transaction (`expenses.resolve_ask_user_answer`). Two callback
+patterns, two handlers, registered separately in `app/telegram/bot.py`.
+
+`app/audit.py:check_midmonth_alerts()` is the deterministic (no-LLM) mid-month
+counterpart — `salary_late` and `pace_high` — deduped via `audit_alerts_sent`
+exactly like `check_budget_alerts` uses `budget_alerts_sent`. It returns `[]`
+when the user has no `salary_profiles` row, since there's nothing to compare
+actual income/spend against. Both `run_audit_all_users` (monthly) and
+`check_salary_alerts_all_users` (daily) are cron bodies in `app/cron.py` behind
+the `/run-audit` and `/check-salary-alerts` endpoints — same fail-closed
+`CRON_SECRET` gate and 202-background-task shape as `/reconcile`/`/check-budgets`.
+
 ### Table state machine
 
-Four tables (`app/models.py`): `users` (bridges Telegram `chat_id` → an
+Core tables (`app/models.py`): `users` (bridges Telegram `chat_id` → an
 internal UUID — not in the original spec, added so the ledger isn't coupled
 to Telegram directly), `transactions`, `expenses` (the actual ledger — `/spend`
 in `app/reports.py` sums this, not `transactions`), `reconciliation_runs`
@@ -125,6 +187,17 @@ run `resolved`; `ask_user` leaves the transaction `pending` and the run
 resolves it, via `app/expenses.py:resolve_ask_user_answer` (creates the
 `expenses` row with `created_via='manual'`, flips both statuses); the
 handler then edits the Telegram message to drop the buttons.
+
+Phase 3a added `budgets` + `budget_alerts_sent` (per-category monthly limit +
+once-per-month alert dedup). Phase 4 added four more: `incomes` (the money-in
+ledger — deliberately *not* `expenses`, so `/spend`/budgets never see it),
+`salary_profiles` (one row per user: expected salary, savings target, payday),
+`audit_runs` (the monthly-audit trail, whose unique `(user_id, period_month)`
+index doubles as the once-per-month idempotency guard), and `audit_alerts_sent`
+(mid-month alert dedup, keyed `(user_id, month, alert_type)` — the
+`budget_alerts_sent` pattern). No status columns on the Phase 4 tables: the
+audit's "have I already done this month" question is answered by row existence
+in `audit_runs`/`audit_alerts_sent`, not a status field.
 
 ### SMS parsing: regex-first, direction-aware, LLM fallback for the residue
 

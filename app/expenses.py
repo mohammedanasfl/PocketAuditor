@@ -74,3 +74,19 @@ async def resolve_ask_user_answer(session: AsyncSession, run_id: UUID, category:
     await session.commit()
     logger.info("run=%s: resolved via ask_user answer, category=%s expense=%s", run_id, category, expense.id)
     return expense
+
+
+async def recategorize_expense(session: AsyncSession, expense_id: UUID, category: str) -> Expense | None:
+    """Change an existing expense's category — the monthly audit's anomaly
+    ask-flow (the `acat:` inline buttons). Distinct from resolve_ask_user_answer,
+    which *creates* an expense from a pending transaction: here the expense
+    already exists (auto_logged or manual) and only its category changes.
+    Returns None if the expense no longer exists (an expected stale-button
+    race, not an error)."""
+    expense = await session.get(Expense, expense_id)
+    if expense is None:
+        return None
+    expense.category = category
+    await session.commit()
+    logger.info("recategorized expense=%s to %s", expense_id, category)
+    return expense

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from app.schemas import ExtractedReceipt, LLMExtraction, MatchDecision, QueryIntent
+from app.schemas import AuditReport, ExtractedReceipt, LLMExtraction, MatchDecision, QueryIntent
 
 
 class LLMDecisionError(RuntimeError):
@@ -37,6 +37,13 @@ class LLMProvider(Protocol):
         """Turn a natural-language question (Phase 3b's /ask) into a fixed
         query intent — never SQL, never anything app/query.py would need to
         trust beyond its declared shape."""
+        ...
+
+    async def audit_finances(self, snapshot: dict) -> AuditReport:
+        """Write the monthly salary-audit findings (Phase 4) from a
+        pre-computed financial snapshot. Returns prose + which anomaly
+        candidates to flag — never numbers; app/audit.py computes every figure
+        and re-checks the flagged ids in code."""
         ...
 
 

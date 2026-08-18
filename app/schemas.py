@@ -71,6 +71,28 @@ class ExtractedReceipt(BaseModel):
     readable: bool
 
 
+class AuditReport(BaseModel):
+    """Output of LLMProvider.audit_finances — Phase 4 monthly salary audit.
+
+    The LLM is the auditor's *voice*, not its calculator. Every exact figure
+    (income, spend, savings rate, category totals) is computed in app/audit.py
+    and handed to the model in a snapshot; the model returns ONLY prose
+    (summary + recommendations) and which of the pre-selected anomaly
+    candidates to flag for review — never numbers. app/audit.py re-checks the
+    flagged ids against the set it actually offered, in code, discarding any
+    the model invented — the same "guard in code, don't trust the prompt"
+    hallucination check app/agent.py's _apply_guard applies to
+    matched_expense_id.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    summary: str
+    recommendations: list[str]
+    flagged_expense_ids: list[UUID]
+    confidence: float = Field(ge=0.0, le=1.0)
+
+
 class QueryIntent(BaseModel):
     """Output of LLMProvider.interpret_query — Phase 3b NL query chat.
 

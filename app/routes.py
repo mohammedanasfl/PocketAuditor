@@ -1,5 +1,6 @@
-"""FastAPI route declarations: the Telegram webhook receiver, the /reconcile
-and /check-budgets cron endpoints, and /health for the keep-alive ping.
+"""FastAPI route declarations: the Telegram webhook receiver, the /reconcile,
+/check-budgets, /run-audit, and /check-salary-alerts cron endpoints, and
+/health for the keep-alive ping.
 
 No business logic lives here — the two cron endpoints just schedule a
 BackgroundTasks call into app.cron and return immediately (202) so the
@@ -25,7 +26,12 @@ from telegram import Update
 from telegram.ext import Application
 
 from app.config import settings
-from app.cron import check_budgets_all_users, reconcile_all_users
+from app.cron import (
+    check_budgets_all_users,
+    check_salary_alerts_all_users,
+    reconcile_all_users,
+    run_audit_all_users,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -74,4 +80,22 @@ async def check_budgets_endpoint(request: Request, background_tasks: BackgroundT
     fire-and-return-202 shape as /reconcile."""
     logger.info("POST /check-budgets — scheduling background run for all users")
     background_tasks.add_task(check_budgets_all_users, request.app.state.application)
+    return {"status": "scheduled"}
+
+
+@router.post("/run-audit", status_code=202, dependencies=[Depends(_verify_cron_secret)])
+async def run_audit_endpoint(request: Request, background_tasks: BackgroundTasks) -> dict:
+    """Triggers the monthly salary audit for every user (previous completed
+    month). Same fire-and-return-202, cron-secret-gated shape as /reconcile."""
+    logger.info("POST /run-audit — scheduling background run for all users")
+    background_tasks.add_task(run_audit_all_users, request.app.state.application)
+    return {"status": "scheduled"}
+
+
+@router.post("/check-salary-alerts", status_code=202, dependencies=[Depends(_verify_cron_secret)])
+async def check_salary_alerts_endpoint(request: Request, background_tasks: BackgroundTasks) -> dict:
+    """Triggers the daily mid-month salary-alert check for every user. Same
+    fire-and-return-202, cron-secret-gated shape as /check-budgets."""
+    logger.info("POST /check-salary-alerts — scheduling background run for all users")
+    background_tasks.add_task(check_salary_alerts_all_users, request.app.state.application)
     return {"status": "scheduled"}
