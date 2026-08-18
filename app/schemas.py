@@ -94,7 +94,9 @@ class AuditReport(BaseModel):
 
 
 class QueryIntent(BaseModel):
-    """Output of LLMProvider.interpret_query — Phase 3b NL query chat.
+    """Output of LLMProvider.interpret_query — Phase 3b NL query chat, later
+    widened (Phase 4) beyond pure spending questions to cover overall balance
+    ("how much money do I have left") via aggregation="net".
 
     This is the *only* thing an LLM ever produces for a query: a small fixed
     intent, never SQL and never free text. app/query.py is the one place
@@ -102,10 +104,10 @@ class QueryIntent(BaseModel):
     the LLM never sees or writes SQL, which is the actual safety property
     that matters for a personal-finance bot.
 
-    `is_expense_question` exists for the same reason LLMExtraction.is_transaction
+    `is_financial_question` exists for the same reason LLMExtraction.is_transaction
     and ExtractedReceipt.readable do: without an explicit escape hatch, the
     model is forced to squeeze an unrelated question (a general-knowledge
-    question, a greeting, a question about the bot itself) into a spending
+    question, a greeting, a question about the bot itself) into a financial
     answer that happens to look plausible — e.g. "what is API?" getting
     answered with a real total spend figure, because date_range/aggregation
     still have to be *something*.
@@ -113,10 +115,10 @@ class QueryIntent(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    is_expense_question: bool
+    is_financial_question: bool
     category: str | None
     date_range: Literal["today", "this_week", "last_week", "this_month", "last_month", "custom"]
     custom_start: date | None
     custom_end: date | None
-    aggregation: Literal["sum", "count", "max", "list"]
+    aggregation: Literal["sum", "count", "max", "list", "net"]
     intent_summary: str

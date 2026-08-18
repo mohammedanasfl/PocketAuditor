@@ -421,7 +421,7 @@ create an expense in a category no budget will ever match.
 Forwarding plain text that isn't a real bank/UPI alert (e.g. typing `food
 900` directly instead of using `/log`) is deliberately rejected rather than
 guessed at — see [NL query chat](#nl-query-chat-phase-3b)'s and the SMS
-parser's `is_transaction`/`is_expense_question` guards below for why. `/log`
+parser's `is_transaction`/`is_financial_question` guards below for why. `/log`
 is the explicit, predictable way to do this instead — same reasoning as
 `/ask` being a command rather than passive listening.
 
@@ -459,10 +459,10 @@ above for why daily rather than weekly.
 ## NL query chat (Phase 3b)
 
 `/ask <question>` answers a single, self-contained question about your
-expense ledger, e.g. `/ask how much did I spend on food this week` or
-`/ask biggest expense last month`. Each `/ask` is independent — there's no
-multi-turn refinement ("what about last month?" as a follow-up starts over,
-it isn't remembered).
+finances, e.g. `/ask how much did I spend on food this week`, `/ask biggest
+expense last month`, or `/ask how much money do I have left this month`.
+Each `/ask` is independent — there's no multi-turn refinement ("what about
+last month?" as a follow-up starts over, it isn't remembered).
 
 **Constrained query builder, not free-form SQL generation.** The LLM never
 sees or produces SQL. `LLMProvider.interpret_query(question)` fills in a
@@ -470,12 +470,23 @@ small, fixed `QueryIntent` (category, one of six date-range enums, an
 aggregation type, plus a one-sentence summary) — the *only* thing an LLM ever
 produces for `/ask`. `app/query.py:run_query` is the one hand-written place
 that turns a `QueryIntent` into a real, parameterized SQLAlchemy query
-against `expenses`; every value (including `category`, matched
-case-insensitively) is bound as a query parameter, never concatenated into
-SQL text — so nothing in the question, however it's phrased, can alter the
-query's structure. `tests/test_query.py` proves this directly: a `category`
-containing `'; DROP TABLE expenses; --` is treated as an inert literal string
-that simply matches nothing.
+against `expenses` (and, for `aggregation="net"`, `incomes` too); every value
+(including `category`, matched case-insensitively) is bound as a query
+parameter, never concatenated into SQL text — so nothing in the question,
+however it's phrased, can alter the query's structure. `tests/test_query.py`
+proves this directly: a `category` containing `'; DROP TABLE expenses; --`
+is treated as an inert literal string that simply matches nothing.
+
+**`aggregation="net"` answers "how much money do I have left" (Phase 4).**
+The other four aggregations (`sum`/`count`/`max`/`list`) only ever read
+`expenses` — they have no concept of income at all, so a balance question
+used to fall through `is_financial_question=false` and get a
+spending-only fallback reply. `net` sums `incomes` and `expenses` (excluding
+the `Savings` category — see below) for the period and reports the
+difference, e.g. `"You have Rs.30,000.00 left this month (Rs.50,000.00
+income − Rs.20,000.00 spent)."`, or the overspent phrasing when negative.
+Unlike the other aggregations, `net` is well-defined even with zero activity
+(`"Rs.0.00 left"`), so it never falls back to the "No expenses found" reply.
 
 **Answers are phrased by string formatting, not a second LLM call** — e.g.
 `"You spent Rs.500.00 on Food this week across 2 transactions."` The numbers
@@ -487,7 +498,7 @@ rather than trusting the model's own arithmetic.
 **Guardrails:**
 - A `date_range`/`category` combination that matches no expenses replies
   plainly — `"No expenses found for that period."` — rather than a confusing
-  empty answer.
+  empty answer (this doesn't apply to `net`, which always has an answer).
 - If `interpret_query`'s structured output fails validation twice (same
   retry pattern as Phase 1's `decide_match`), the reply falls back to "I
   couldn't understand that question — try phrasing it like 'how much on food
@@ -567,7 +578,7 @@ tests themselves never connect to Postgres or Telegram). This is CI only —
 Render keeps deploying on every push to `main` exactly as it already did;
 this workflow doesn't gate that.
 
-217 tests, all offline (mocked HTTP/API calls, aiosqlite for DB tests) — no
+236 tests, all offline (mocked HTTP/API calls, aiosqlite for DB tests) — no
 live Ollama, Telegram, Neon, or Gemini/Claude connection required. Covers:
 
 - **Provider parity** (`tests/test_llm_providers.py`,

@@ -58,7 +58,8 @@ _WELCOME_TEXT = (
     "no bank alert at all, e.g. /log Food 900 lunch\n"
     "/setbudget <category> <amount> — set a monthly limit, e.g. /setbudget Food 4000\n"
     "/budgets — see your limits and this month's spend per category\n"
-    "/ask <question> — ask about your spending, e.g. /ask how much on food this week\n\n"
+    "/ask <question> — ask about your spending, income, or balance, e.g. /ask how much "
+    "on food this week or /ask how much money do I have left this month\n\n"
     "Forward your first SMS whenever you're ready."
 )
 
@@ -269,10 +270,12 @@ async def handle_budgets_command(update: Update, context: ContextTypes.DEFAULT_T
 
 async def handle_ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/ask <question> — a single, self-contained NL query over the user's
-    expense ledger (Phase 3b). Explicit command rather than passive listening
-    on every message, same reasoning as the photo handler being opt-in via
-    /reconcile rather than auto-triggered: predictable behavior, and it keeps
-    a forwarded SMS from ever being misread as a question.
+    finances: spending, income, or overall balance (Phase 3b, widened by
+    Phase 4's aggregation="net" for "how much money do I have left"). Explicit
+    command rather than passive listening on every message, same reasoning as
+    the photo handler being opt-in via /reconcile rather than auto-triggered:
+    predictable behavior, and it keeps a forwarded SMS from ever being
+    misread as a question.
 
     interpret_query only ever returns a QueryIntent — run_query (app/query.py)
     is the one place that becomes a real, parameterized query; this handler
@@ -298,11 +301,11 @@ async def handle_ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return
 
-    if not intent.is_expense_question:
-        logger.info("chat=%s: /ask question isn't about expenses: %r", chat_id, question)
+    if not intent.is_financial_question:
+        logger.info("chat=%s: /ask question isn't about finances: %r", chat_id, question)
         await update.message.reply_text(
-            "I can only answer questions about your spending — try something like "
-            "'how much did I spend on food this week?'"
+            "I can only answer questions about your spending, income, or balance — try something like "
+            "'how much did I spend on food this week?' or 'how much money do I have left this month?'"
         )
         return
 

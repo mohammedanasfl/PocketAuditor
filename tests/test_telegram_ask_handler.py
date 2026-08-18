@@ -11,13 +11,14 @@ from datetime import date
 from decimal import Decimal
 from types import SimpleNamespace
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import app.query as query_module
 import app.telegram.handlers.commands as handlers_module
 from app.db import Base
 from app.llm.base import LLMDecisionError
-from app.models import Expense, User
+from app.models import Expense, Income, User
 from app.schemas import QueryIntent
 from app.telegram.handlers import handle_ask_command
 
@@ -28,7 +29,7 @@ def _intent(**overrides) -> QueryIntent:
     # which resolve_date_range's own dedicated tests (tests/test_query.py)
     # already cover for the named ranges.
     defaults = dict(
-        is_expense_question=True,
+        is_financial_question=True,
         category="Food",
         date_range="custom",
         custom_start=date(2026, 8, 1),
@@ -147,7 +148,7 @@ async def test_ask_nonsense_question_gets_graceful_fallback(tmp_path, monkeypatc
 async def test_ask_question_unrelated_to_expenses_does_not_run_a_query(tmp_path, monkeypatch):
     """Regression: "what is API?" must not come back with a real (but
     irrelevant) spend figure just because date_range/aggregation still had
-    to be *something* — is_expense_question=false must be trusted and
+    to be *something* — is_financial_question=false must be trusted and
     short-circuit before run_query is ever called."""
     session_factory, engine = await _sqlite_session_factory(tmp_path, monkeypatch)
     await _seed_user_and_expenses(session_factory)
@@ -161,7 +162,7 @@ async def test_ask_question_unrelated_to_expenses_does_not_run_a_query(tmp_path,
 
     monkeypatch.setattr(handlers_module, "run_query", _spy_run_query)
 
-    provider = _FakeProvider(intent=_intent(is_expense_question=False, intent_summary="What is API?"))
+    provider = _FakeProvider(intent=_intent(is_financial_question=False, intent_summary="What is API?"))
     update, context, replies = _make_update_and_context(["what", "is", "api", "?"], provider)
 
     await handle_ask_command(update, context)
@@ -169,6 +170,27 @@ async def test_ask_question_unrelated_to_expenses_does_not_run_a_query(tmp_path,
     assert received_calls == []  # run_query never called
     assert len(replies) == 1
     assert "only answer questions about your spending" in replies[0]
+    await engine.dispose()
+
+
+async def test_ask_net_balance_question_returns_income_minus_spend(tmp_path, monkeypatch):
+    """The gap this closes: "how much money do I have left" used to get
+    is_financial_question=false and a spending-only fallback, since /ask had
+    no way to represent income at all. aggregation="net" answers it."""
+    session_factory, engine = await _sqlite_session_factory(tmp_path, monkeypatch)
+    await _seed_user_and_expenses(session_factory)  # 200 + 300 Food, 999 Transport
+    async with session_factory() as session:
+        user = (await session.execute(select(User).where(User.telegram_chat_id == 777))).scalar_one()
+        session.add(Income(user_id=user.id, amount=Decimal("60000.00"), txn_date=date(2026, 8, 1), raw_text="x"))
+        await session.commit()
+
+    provider = _FakeProvider(intent=_intent(category=None, aggregation="net", intent_summary="money left"))
+    update, context, replies = _make_update_and_context(["how", "much", "money", "do", "i", "have", "left"], provider)
+
+    await handle_ask_command(update, context)
+
+    assert len(replies) == 1
+    assert "You have Rs.58,501.00 left" in replies[0]  # 60000 - (200+300+999)
     await engine.dispose()
 
 

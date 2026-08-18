@@ -8,6 +8,12 @@ be exactly what the query returned, and an LLM re-stating them is a chance
 _apply_guard re-checking the model's own decision in code rather than
 trusting it — anything that must be exactly right is computed, not phrased
 by a model.
+
+Phase 4 widened this beyond `expenses` alone: aggregation="net" answers
+"how much money do I have left" style questions by also summing `incomes`
+for the period. Savings-category expenses are excluded from that sum, same
+as app/reports.py and app/audit.py — money moved to another account isn't
+spent, so counting it as spend would understate the balance.
 """
 
 from __future__ import annotations
@@ -21,7 +27,8 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Expense
+from app.categories import SAVINGS_CATEGORY
+from app.models import Expense, Income
 from app.schemas import QueryIntent
 
 logger = logging.getLogger(__name__)
@@ -47,6 +54,10 @@ class QueryResult:
     max_item: dict | None = None
     items: list[dict] = field(default_factory=list)
     truncated: bool = False
+    # Only populated for aggregation="net" — income/spend are always
+    # well-defined (even both zero), so "net" never needs the is_empty path.
+    net_income: Decimal = Decimal("0")
+    net_spend: Decimal = Decimal("0")
 
     @property
     def is_empty(self) -> bool:
@@ -59,7 +70,17 @@ class QueryResult:
             return f"on {self.start}"
         return f"from {self.start} to {self.end}"
 
+    def _net_message(self) -> str:
+        net = self.net_income - self.net_spend
+        detail = f"(Rs.{self.net_income:,.2f} income − Rs.{self.net_spend:,.2f} spent)"
+        period_phrase = self._period_phrase()
+        if net >= 0:
+            return f"You have Rs.{net:,.2f} left {period_phrase} {detail}."
+        return f"You've spent Rs.{-net:,.2f} more than you earned {period_phrase} {detail}."
+
     def as_message(self) -> str:
+        if self.intent.aggregation == "net":
+            return self._net_message()
         if self.is_empty:
             return "No expenses found for that period."
 
@@ -122,6 +143,40 @@ def resolve_date_range(intent: QueryIntent, today: date) -> tuple[date, date]:
     return intent.custom_start, intent.custom_end
 
 
+async def _run_net_query(
+    session: AsyncSession, user_id: UUID, intent: QueryIntent, start: date, end: date
+) -> QueryResult:
+    """aggregation="net": income minus spend for the period, spanning both
+    ledgers rather than filtering `expenses` alone. `category` is ignored
+    here regardless of what the model set — a balance isn't category-scoped."""
+    income_total = Decimal(
+        str(
+            (
+                await session.execute(
+                    select(func.coalesce(func.sum(Income.amount), 0)).where(
+                        Income.user_id == user_id, Income.txn_date >= start, Income.txn_date <= end
+                    )
+                )
+            ).scalar_one()
+        )
+    )
+    spend_total = Decimal(
+        str(
+            (
+                await session.execute(
+                    select(func.coalesce(func.sum(Expense.amount), 0)).where(
+                        Expense.user_id == user_id,
+                        Expense.txn_date >= start,
+                        Expense.txn_date <= end,
+                        func.lower(Expense.category) != SAVINGS_CATEGORY.lower(),
+                    )
+                )
+            ).scalar_one()
+        )
+    )
+    return QueryResult(intent=intent, start=start, end=end, net_income=income_total, net_spend=spend_total)
+
+
 async def run_query(
     session: AsyncSession, user_id: UUID, intent: QueryIntent, *, today: date | None = None
 ) -> QueryResult:
@@ -132,6 +187,9 @@ async def run_query(
     however it's spelled, can affect the query's structure."""
     today = today or date.today()
     start, end = resolve_date_range(intent, today)
+
+    if intent.aggregation == "net":
+        return await _run_net_query(session, user_id, intent, start, end)
 
     stmt = select(Expense).where(
         Expense.user_id == user_id,

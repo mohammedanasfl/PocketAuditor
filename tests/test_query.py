@@ -10,14 +10,14 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
-from app.models import Expense, User
+from app.models import Expense, Income, User
 from app.query import resolve_date_range, run_query
 from app.schemas import QueryIntent
 
 
 def _intent(**overrides) -> QueryIntent:
     defaults = dict(
-        is_expense_question=True,
+        is_financial_question=True,
         category=None,
         date_range="this_week",
         custom_start=None,
@@ -43,6 +43,13 @@ async def _make_expense(
     session.add(expense)
     await session.commit()
     return expense
+
+
+async def _make_income(session, user: User, *, amount: str, txn_date: date) -> Income:
+    income = Income(user_id=user.id, amount=Decimal(amount), txn_date=txn_date, raw_text="x")
+    session.add(income)
+    await session.commit()
+    return income
 
 
 # --- resolve_date_range ---------------------------------------------------
@@ -229,3 +236,82 @@ async def test_run_query_treats_malicious_category_text_as_an_inert_literal(db_s
     everything_intent = _intent(category=None, date_range="this_week", aggregation="list")
     everything = await run_query(db_session, user.id, everything_intent, today=date(2026, 8, 15))
     assert everything.count == 2  # both original rows are still there, untouched
+
+
+# --- run_query: aggregation="net" (Phase 4 — "how much money do I have left") ---
+
+
+async def test_run_query_net_aggregation_positive_balance(db_session):
+    user = await _make_user(db_session)
+    await _make_income(db_session, user, amount="50000.00", txn_date=date(2026, 8, 1))
+    await _make_expense(db_session, user, amount="20000.00", category="Food", txn_date=date(2026, 8, 11))
+
+    intent = _intent(category=None, date_range="this_month", aggregation="net")
+    result = await run_query(db_session, user.id, intent, today=date(2026, 8, 15))
+
+    assert result.net_income == Decimal("50000.00")
+    assert result.net_spend == Decimal("20000.00")
+    assert result.as_message() == ("You have Rs.30,000.00 left this month (Rs.50,000.00 income − Rs.20,000.00 spent).")
+
+
+async def test_run_query_net_aggregation_overspent(db_session):
+    user = await _make_user(db_session)
+    await _make_income(db_session, user, amount="10000.00", txn_date=date(2026, 8, 1))
+    await _make_expense(db_session, user, amount="15000.00", category="Food", txn_date=date(2026, 8, 11))
+
+    intent = _intent(date_range="this_month", aggregation="net")
+    result = await run_query(db_session, user.id, intent, today=date(2026, 8, 15))
+
+    assert "spent Rs.5,000.00 more than you earned" in result.as_message()
+
+
+async def test_run_query_net_aggregation_zero_activity_still_answers(db_session):
+    """Unlike sum/count/max/list, "net" is well-defined even with no rows at
+    all — it must never fall through to the "No expenses found" message."""
+    user = await _make_user(db_session)
+
+    intent = _intent(date_range="this_month", aggregation="net")
+    result = await run_query(db_session, user.id, intent, today=date(2026, 8, 15))
+
+    assert "No expenses found" not in result.as_message()
+    assert "Rs.0.00 left" in result.as_message()
+
+
+async def test_run_query_net_aggregation_excludes_savings_from_spend(db_session):
+    user = await _make_user(db_session)
+    await _make_income(db_session, user, amount="50000.00", txn_date=date(2026, 8, 1))
+    await _make_expense(db_session, user, amount="10000.00", category="Food", txn_date=date(2026, 8, 5))
+    await _make_expense(db_session, user, amount="20000.00", category="Savings", txn_date=date(2026, 8, 6))
+
+    intent = _intent(date_range="this_month", aggregation="net")
+    result = await run_query(db_session, user.id, intent, today=date(2026, 8, 15))
+
+    assert result.net_spend == Decimal("10000.00")  # Savings transfer excluded
+    assert result.net_income == Decimal("50000.00")
+
+
+async def test_run_query_net_aggregation_ignores_category_filter(db_session):
+    """A balance isn't category-scoped — even if a category slipped through,
+    net must still reflect the whole ledger for the period."""
+    user = await _make_user(db_session)
+    await _make_income(db_session, user, amount="50000.00", txn_date=date(2026, 8, 1))
+    await _make_expense(db_session, user, amount="10000.00", category="Food", txn_date=date(2026, 8, 5))
+    await _make_expense(db_session, user, amount="5000.00", category="Transport", txn_date=date(2026, 8, 6))
+
+    intent = _intent(category="Food", date_range="this_month", aggregation="net")
+    result = await run_query(db_session, user.id, intent, today=date(2026, 8, 15))
+
+    assert result.net_spend == Decimal("15000.00")  # both categories counted, not just Food
+
+
+async def test_run_query_net_aggregation_scopes_to_the_requesting_user(db_session):
+    user = await _make_user(db_session)
+    other_user = User(telegram_chat_id=24680)
+    db_session.add(other_user)
+    await db_session.commit()
+    await _make_income(db_session, other_user, amount="99999.00", txn_date=date(2026, 8, 1))
+
+    intent = _intent(date_range="this_month", aggregation="net")
+    result = await run_query(db_session, user.id, intent, today=date(2026, 8, 15))
+
+    assert result.net_income == Decimal("0")
