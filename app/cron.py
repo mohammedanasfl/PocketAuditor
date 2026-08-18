@@ -1,7 +1,8 @@
-"""The two cron-triggered, all-users background jobs — called from
-app/routes.py's /reconcile and /check-budgets endpoints via BackgroundTasks.
-Each opens one DB session per user rather than one for the whole batch, so a
-single slow/erroring user can't hold a transaction open for the rest.
+"""The cron-triggered, all-users background jobs — called from app/routes.py's
+/reconcile, /check-budgets, /run-audit, /check-salary-alerts, and
+/send-weekly-digest endpoints via BackgroundTasks. Each opens one DB session
+per user rather than one for the whole batch, so a single slow/erroring user
+can't hold a transaction open for the rest.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from app.agent import reconcile_user
 from app.audit import check_midmonth_alerts, run_monthly_audit
 from app.budgets import check_budget_alerts
 from app.db import SessionLocal
+from app.digest import build_weekly_digest
 from app.models import User
 from app.telegram.handlers import send_ask_user_message, send_audit_question
 
@@ -90,3 +92,18 @@ async def check_salary_alerts_all_users(application: Application) -> None:
         for alert in alerts:
             logger.info("background check-salary-alerts: user=%s — %s", user.id, alert.alert_type)
             await application.bot.send_message(chat_id=user.telegram_chat_id, text=alert.as_message())
+
+
+async def send_weekly_digest_all_users(application: Application) -> None:
+    """The weekly-cron body: send every known user their deterministic (no
+    LLM) weekly spend digest. Same shape as check_budgets_all_users — no
+    llm_provider needed."""
+    async with SessionLocal() as session:
+        users = (await session.execute(select(User))).scalars().all()
+    logger.info("background send-weekly-digest: %d user(s) to process", len(users))
+
+    for user in users:
+        async with SessionLocal() as session:
+            digest = await build_weekly_digest(session, user.id)
+        logger.info("background send-weekly-digest: user=%s", user.id)
+        await application.bot.send_message(chat_id=user.telegram_chat_id, text=digest.as_message())

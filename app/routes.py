@@ -1,6 +1,6 @@
 """FastAPI route declarations: the Telegram webhook receiver, the /reconcile,
-/check-budgets, /run-audit, and /check-salary-alerts cron endpoints, and
-/health for the keep-alive ping.
+/check-budgets, /run-audit, /check-salary-alerts, and /send-weekly-digest cron
+endpoints, and /health for the keep-alive ping.
 
 No business logic lives here — the two cron endpoints just schedule a
 BackgroundTasks call into app.cron and return immediately (202) so the
@@ -31,6 +31,7 @@ from app.cron import (
     check_salary_alerts_all_users,
     reconcile_all_users,
     run_audit_all_users,
+    send_weekly_digest_all_users,
 )
 
 logger = logging.getLogger(__name__)
@@ -98,4 +99,13 @@ async def check_salary_alerts_endpoint(request: Request, background_tasks: Backg
     fire-and-return-202, cron-secret-gated shape as /check-budgets."""
     logger.info("POST /check-salary-alerts — scheduling background run for all users")
     background_tasks.add_task(check_salary_alerts_all_users, request.app.state.application)
+    return {"status": "scheduled"}
+
+
+@router.post("/send-weekly-digest", status_code=202, dependencies=[Depends(_verify_cron_secret)])
+async def send_weekly_digest_endpoint(request: Request, background_tasks: BackgroundTasks) -> dict:
+    """Triggers the weekly spend digest for every user. Same
+    fire-and-return-202, cron-secret-gated shape as /reconcile."""
+    logger.info("POST /send-weekly-digest — scheduling background run for all users")
+    background_tasks.add_task(send_weekly_digest_all_users, request.app.state.application)
     return {"status": "scheduled"}

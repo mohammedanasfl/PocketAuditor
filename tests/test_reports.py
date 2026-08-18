@@ -106,6 +106,23 @@ async def test_spend_summary_excludes_savings_case_insensitively(db_session):
     assert summary.total == Decimal("0")
 
 
+async def test_spend_summary_accepts_an_injected_today(db_session):
+    """app/digest.py needs get_spend_summary to use the SAME today its own
+    week-scoped queries use, not an independently-evaluated date.today() —
+    otherwise the two could disagree on which week/month it currently is."""
+    user = await _make_user(db_session)
+    fixed_today = date(2026, 8, 12)  # a Wednesday
+    week_start = fixed_today - timedelta(days=fixed_today.weekday())
+
+    await _make_expense(db_session, user, amount="100.00", txn_date=fixed_today)
+    await _make_expense(db_session, user, amount="50.00", txn_date=week_start - timedelta(days=1))  # last week
+
+    summary = await get_spend_summary(db_session, user.id, today=fixed_today)
+
+    assert summary.week == Decimal("100.00")
+    assert summary.month == Decimal("150.00")
+
+
 def test_as_message_formats_all_four_periods():
     from app.reports import SpendSummary
 

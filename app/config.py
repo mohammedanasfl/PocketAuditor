@@ -44,6 +44,11 @@ class Settings(BaseSettings):
     confidence_threshold: float = 0.75
     candidate_amount_tolerance_pct: float = 0.05
     candidate_date_window_days: int = 2
+    # Independent from candidate_date_window_days even though both default to
+    # 2 — one governs auto_link candidate matching, this one governs the
+    # duplicate-charge guard; see CLAUDE.md's note on confidence_threshold vs.
+    # _LLM_FALLBACK_THRESHOLD for the same "shared value, different knob" shape.
+    duplicate_charge_window_days: int = 2
 
     # --- Salary audit (Phase 4) -------------------------------------------
     # How close a credit must be to the profile's expected_salary to count as

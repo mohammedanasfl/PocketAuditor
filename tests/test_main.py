@@ -201,3 +201,35 @@ def test_check_salary_alerts_endpoint_rejects_wrong_or_missing_cron_secret(monke
 
     assert client.post("/check-salary-alerts").status_code == 401
     assert client.post("/check-salary-alerts", headers={"X-Cron-Secret": "wrong"}).status_code == 401
+
+
+def test_send_weekly_digest_endpoint_returns_202_and_schedules_the_background_task(monkeypatch):
+    calls: list = []
+
+    async def _fake_send_weekly_digest_all_users(application) -> None:
+        calls.append(application)
+
+    stub_application = SimpleNamespace(bot_data={}, bot=None)
+    monkeypatch.setattr(settings, "cron_secret", "expected-cron-secret")
+    monkeypatch.setattr(main_module.app.state, "application", stub_application, raising=False)
+    monkeypatch.setattr(routes_module, "send_weekly_digest_all_users", _fake_send_weekly_digest_all_users)
+
+    response = client.post("/send-weekly-digest", headers={"X-Cron-Secret": "expected-cron-secret"})
+
+    assert response.status_code == 202
+    assert response.json() == {"status": "scheduled"}
+    assert calls == [stub_application]
+
+
+def test_send_weekly_digest_endpoint_rejects_wrong_or_missing_cron_secret(monkeypatch):
+    monkeypatch.setattr(settings, "cron_secret", "expected-cron-secret")
+
+    assert client.post("/send-weekly-digest").status_code == 401
+    assert client.post("/send-weekly-digest", headers={"X-Cron-Secret": "wrong"}).status_code == 401
+
+
+def test_send_weekly_digest_endpoint_rejects_everything_when_no_cron_secret_configured(monkeypatch):
+    monkeypatch.setattr(settings, "cron_secret", None)
+
+    response = client.post("/send-weekly-digest", headers={"X-Cron-Secret": "anything"})
+    assert response.status_code == 401

@@ -49,10 +49,13 @@ async def _sum_since(session: AsyncSession, user_id: UUID, since: date | None) -
     return Decimal(str(total))
 
 
-async def get_spend_summary(session: AsyncSession, user_id: UUID) -> SpendSummary:
+async def get_spend_summary(session: AsyncSession, user_id: UUID, *, today: date | None = None) -> SpendSummary:
     """ "This week" is the current Monday-start week; "this month"/"this year"
-    are the current calendar month/year — all relative to today."""
-    today = date.today()
+    are the current calendar month/year — all relative to today (overridable
+    for tests and for app/digest.py, which needs the same "today" its own
+    week-scoped queries use, not a second, independently-evaluated
+    date.today())."""
+    today = today or date.today()
     week_start = today - timedelta(days=today.weekday())
     month_start = today.replace(day=1)
     year_start = today.replace(month=1, day=1)

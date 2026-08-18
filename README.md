@@ -51,8 +51,10 @@ app/
   salary.py     the per-user salary profile (/salary)
   budgets.py    deterministic budget-threshold alerts — no LLM involved
   query.py      QueryIntent -> parameterized SQLAlchemy query -> phrased answer
+  merchant_memory.py   per-merchant remembered category — never ask about the same merchant twice
+  digest.py     deterministic (no LLM) weekly spend digest
   telegram/     bot handlers (SMS text, photo receipts, /reconcile, /log, /income, /salary, /audit, /setbudget, /budgets, /ask, category + audit callbacks)
-  main.py       FastAPI app: /telegram/webhook, /reconcile, /check-budgets, /run-audit, /check-salary-alerts, /health
+  main.py       FastAPI app: /telegram/webhook, /reconcile, /check-budgets, /run-audit, /check-salary-alerts, /send-weekly-digest, /health
 alembic/        migrations
 tests/          pytest suite (all offline — no live Ollama/Telegram/DB needed)
 ```
@@ -302,6 +304,31 @@ alert type per calendar month), so daily checking doesn't mean daily nagging.
 Both endpoints are gated by the same `CRON_SECRET` as `/reconcile` and
 `/check-budgets`.
 
+### Weekly cron for the spend digest (GitHub Actions)
+
+```yaml
+# .github/workflows/weekly-digest.yml
+name: Weekly digest
+on:
+  schedule:
+    - cron: "0 3 * * 1"   # Monday 03:00 UTC
+  workflow_dispatch: {}
+jobs:
+  weekly-digest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger weekly digest
+        run: |
+          curl -X POST "${{ secrets.APP_URL }}/send-weekly-digest" \
+            -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" -f
+```
+
+Same `202`-and-background-task shape, gated by the same `CRON_SECRET`. Unlike
+the budget/salary alerts, there's no dedup table here — a weekly cron running
+once a week has no "checked more often than the natural period" problem to
+solve, so a duplicate send is just a harmless repeated read-only message, the
+same reasoning that already applies to `/reconcile`.
+
 ### Keep-alive ping (Render + Neon free tier)
 
 `GET /health` returns `200` without touching the database, so a keep-alive
@@ -424,6 +451,32 @@ guessed at — see [NL query chat](#nl-query-chat-phase-3b)'s and the SMS
 parser's `is_transaction`/`is_financial_question` guards below for why. `/log`
 is the explicit, predictable way to do this instead — same reasoning as
 `/ask` being a command rather than passive listening.
+
+---
+
+## Merchant memory & duplicate detection
+
+Two small, deterministic additions to the reconcile loop, on top of the
+guards above.
+
+**Merchant memory.** Once you answer an `ask_user` question for a merchant
+(e.g. picking "Food" for "Swiggy"), that choice is remembered
+(`app/merchant_memory.py`, the `merchant_categories` table). The next
+transaction from the same merchant — with no manual expense candidate to
+consider instead, and no more specific category hint already at hand for
+that transaction — skips the LLM call entirely and auto-logs straight from
+memory. A photo caption or a manual candidate always takes priority over a
+remembered default; memory only fills in when there's nothing more specific
+to go on.
+
+**Duplicate-charge guard.** A new transaction with the same merchant and
+amount as an expense already logged within the last couple of days
+(`duplicate_charge_window_days`, default 2) gets asked about instead of
+silently auto-linked/auto-logged — a same-merchant, same-amount repeat is
+often a genuine double-debit, not two separate purchases. This is a
+deliberate friction cost for legitimate same-day repeat purchases (two
+identical coffees, say) in exchange for catching real double-debits before
+they quietly become two expenses instead of one.
 
 ---
 
@@ -564,6 +617,21 @@ for the schedules.
 
 ---
 
+## Weekly digest
+
+A lightweight, proactive, **fully deterministic** (no LLM call) weekly
+message (`app/digest.py`, the weekly `/send-weekly-digest` cron): this
+week's total spend, the month so far, the top spending category this week,
+and the biggest single expense this week. Excludes the `Savings` category
+the same way `/spend`, the monthly audit, its `pace_high` alert, and `/ask`'s
+`net` aggregation already do — this is the fifth call site applying that
+exclusion. No dedup table (see
+[Weekly cron for the spend digest](#weekly-cron-for-the-spend-digest-github-actions)
+above for why); no on-demand command — this is cron-only, same as the budget
+and salary alerts.
+
+---
+
 ## Testing
 
 ```bash
@@ -578,7 +646,7 @@ tests themselves never connect to Postgres or Telegram). This is CI only —
 Render keeps deploying on every push to `main` exactly as it already did;
 this workflow doesn't gate that.
 
-236 tests, all offline (mocked HTTP/API calls, aiosqlite for DB tests) — no
+268 tests, all offline (mocked HTTP/API calls, aiosqlite for DB tests) — no
 live Ollama, Telegram, Neon, or Gemini/Claude connection required. Covers:
 
 - **Provider parity** (`tests/test_llm_providers.py`,
@@ -597,7 +665,15 @@ live Ollama, Telegram, Neon, or Gemini/Claude connection required. Covers:
   the LLM fallback.
 - **Agent loop** (`tests/test_agent.py`) — all three actions, both
   code-level conservatism guards (low confidence, hallucinated match id),
-  per-transaction error isolation, candidate exclusion.
+  per-transaction error isolation, candidate exclusion, the merchant-memory
+  short-circuit (including that it's skipped when a candidate or a
+  category_hint exists, and that it still auto-logs a caption-less photo
+  transaction), and the duplicate-charge guard (window boundary, merchant
+  mismatch, both auto_link and auto_log downgraded).
+- **Merchant memory** (`tests/test_merchant_memory.py`,
+  `tests/test_expenses.py`) — normalization round-trips, per-user scoping,
+  overwrite-not-duplicate on a second `ask_user` answer for the same
+  merchant, no-op on a merchant-less transaction.
 - **Source parity** (`tests/test_agent_source_parity.py`) — the same
   scenario (all three actions plus the guard) run once with
   `source='sms'` and once with `source='photo'` produces identical outcomes,
@@ -640,9 +716,14 @@ live Ollama, Telegram, Neon, or Gemini/Claude connection required. Covers:
   `tests/test_audit_callback.py`, `tests/test_telegram_income_handler.py`,
   `tests/test_telegram_salary_handler.py`) — `/audit` report + anomaly
   questions, the `acat:` recategorize round trip, `/income`, `/salary`.
+- **Weekly digest** (`tests/test_digest.py`, `tests/test_reports.py`) —
+  reuse of `get_spend_summary`'s totals via an injected `today`, top-category
+  and biggest-expense queries, the Savings exclusion, zero-activity, and a
+  deterministic tie-break on the biggest-expense query.
 - **FastAPI wiring** (`tests/test_main.py`) — webhook secret check, and
-  `/reconcile`, `/check-budgets`, `/run-audit`, `/check-salary-alerts`
-  background-task scheduling (each fail-closed on `CRON_SECRET`), `/health`.
+  `/reconcile`, `/check-budgets`, `/run-audit`, `/check-salary-alerts`,
+  `/send-weekly-digest` background-task scheduling (each fail-closed on
+  `CRON_SECRET`), `/health`.
 
 To sanity-check the provider abstraction against a **real** model (not
 mocks — this is what actually proves the abstraction holds, since the unit

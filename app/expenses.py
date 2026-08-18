@@ -15,6 +15,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.merchant_memory import remember_merchant_category
 from app.models import Expense, ReconciliationRun, Transaction
 
 logger = logging.getLogger(__name__)
@@ -70,6 +71,8 @@ async def resolve_ask_user_answer(session: AsyncSession, run_id: UUID, category:
     txn.status = "processed"
     run.status = "resolved"
     run.resolved_at = datetime.now(UTC)
+
+    await remember_merchant_category(session, run.user_id, txn.merchant, category)
 
     await session.commit()
     logger.info("run=%s: resolved via ask_user answer, category=%s expense=%s", run_id, category, expense.id)

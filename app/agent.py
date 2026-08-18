@@ -14,12 +14,13 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.categories import normalize_category
 from app.config import settings
 from app.llm.base import LLMDecisionError, LLMProvider
+from app.merchant_memory import recall_merchant_category
 from app.models import Expense, ReconciliationRun, Transaction
 from app.schemas import MatchDecision
 
@@ -115,6 +116,25 @@ async def _find_candidates(session: AsyncSession, user_id: UUID, txn: Transactio
     return candidates[:_MAX_CANDIDATES]
 
 
+async def _find_recent_duplicate_expense(session: AsyncSession, user_id: UUID, txn: Transaction) -> Expense | None:
+    """Same merchant + same amount within duplicate_charge_window_days of an
+    EXISTING expense — unlike _find_candidates, this checks every expense
+    (not just unlinked ones), since a duplicate SMS for something already
+    logged is still a duplicate. Only meaningful when txn.merchant is set;
+    callers must not call this for a merchant-less transaction."""
+    assert txn.merchant is not None  # callers only invoke this when txn.merchant is truthy
+    window = timedelta(days=settings.duplicate_charge_window_days)
+    stmt = select(Expense).where(
+        Expense.user_id == user_id,
+        func.lower(Expense.merchant) == txn.merchant.strip().lower(),
+        Expense.amount == txn.amount,
+        Expense.txn_date >= txn.txn_date - window,
+        Expense.txn_date <= txn.txn_date + window,
+    )
+    result = await session.execute(stmt)
+    return result.scalars().first()
+
+
 def _apply_guard(decision: MatchDecision, candidate_ids: set[str], txn: Transaction) -> MatchDecision:
     """Enforce conservatism in code, not just via the prompt — a 7B model
     will not reliably obey a prompt-only rule. Downgrades auto_link/auto_log
@@ -157,6 +177,30 @@ def _apply_guard(decision: MatchDecision, candidate_ids: set[str], txn: Transact
     if guard_note is None:
         return decision
 
+    logger.info("guard fired: %s (was %s)", guard_note, decision.action)
+    return MatchDecision(
+        action="ask_user",
+        matched_expense_id=None,
+        suggested_category=decision.suggested_category,
+        confidence=decision.confidence,
+        reasoning=f"{decision.reasoning} [downgraded to ask_user: {guard_note}]",
+    )
+
+
+def _apply_duplicate_guard(decision: MatchDecision, duplicate: Expense | None) -> MatchDecision:
+    """A same-merchant, same-amount expense within duplicate_charge_window_days
+    is often a double-debit, not two separate purchases — downgrade an
+    auto_link/auto_log to ask_user regardless of confidence so the user can
+    confirm it's real. Same style as _apply_guard: rebuild the decision, log
+    and note why. ask_user decisions are already conservative and pass through
+    untouched, same as _apply_guard."""
+    if decision.action == "ask_user" or duplicate is None:
+        return decision
+
+    guard_note = (
+        f"possible duplicate of an existing Rs.{duplicate.amount} expense "
+        f"on {duplicate.txn_date} ({duplicate.merchant})"
+    )
     logger.info("guard fired: %s (was %s)", guard_note, decision.action)
     return MatchDecision(
         action="ask_user",
@@ -281,16 +325,39 @@ async def reconcile_user(session: AsyncSession, provider: LLMProvider, user_id: 
         candidate_dicts = [_expense_to_dict(expense) for expense in candidates]
         candidate_ids = {c["id"] for c in candidate_dicts}
 
-        try:
-            decision = await provider.decide_match(_transaction_to_dict(txn), candidate_dicts)
-        except LLMDecisionError as exc:
-            logger.warning("txn=%s: provider error, skipping (%s)", txn.id, exc)
-            summary.errors += 1
-            continue
+        remembered_category = None
+        if txn.merchant and not txn.category_hint:
+            remembered_category = await recall_merchant_category(session, user_id, txn.merchant)
 
-        decision = _apply_guard(decision, candidate_ids, txn)
-        decision = _apply_category_hint(decision, txn)
-        decision = _normalize_auto_log_category(decision)
+        if not candidates and remembered_category:
+            # Already canonical and fully trusted (learned from a past
+            # ask_user answer, not a model guess) — skip the LLM call and the
+            # model-trust guards entirely (_apply_guard/_apply_category_hint/
+            # _normalize_auto_log_category), since those exist to second-guess
+            # the model, not a deterministic memory lookup. Still runs through
+            # the duplicate-charge guard below — memory doesn't rule that out.
+            decision = MatchDecision(
+                action="auto_log",
+                matched_expense_id=None,
+                suggested_category=remembered_category,
+                confidence=1.0,
+                reasoning=f"Remembered category for merchant '{txn.merchant}' from a previous manual choice.",
+            )
+            duplicate = await _find_recent_duplicate_expense(session, user_id, txn)
+            decision = _apply_duplicate_guard(decision, duplicate)
+        else:
+            try:
+                decision = await provider.decide_match(_transaction_to_dict(txn), candidate_dicts)
+            except LLMDecisionError as exc:
+                logger.warning("txn=%s: provider error, skipping (%s)", txn.id, exc)
+                summary.errors += 1
+                continue
+
+            duplicate = await _find_recent_duplicate_expense(session, user_id, txn) if txn.merchant else None
+            decision = _apply_guard(decision, candidate_ids, txn)
+            decision = _apply_duplicate_guard(decision, duplicate)
+            decision = _apply_category_hint(decision, txn)
+            decision = _normalize_auto_log_category(decision)
         pending = await _act(session, user_id, txn, decision)
         logger.info(
             "txn=%s: decision=%s confidence=%.2f candidates=%d",

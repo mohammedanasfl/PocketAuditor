@@ -215,6 +215,27 @@ class AuditAlertSent(Base):
     sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class MerchantCategory(Base):
+    """Remembers a user's past ask_user category choice for a merchant, so
+    app/agent.py:reconcile_user never has to ask about the same merchant
+    twice. `merchant` is always pre-normalized (see
+    app.merchant_memory.normalize_merchant) before it's written or queried —
+    it's Text, not a bounded String, to match Transaction.merchant/
+    Expense.merchant's own unbounded type. One row per (user, merchant); a
+    later ask_user answer for the same merchant overwrites the category
+    rather than creating a second row."""
+
+    __tablename__ = "merchant_categories"
+    __table_args__ = (Index("ix_merchant_categories_user_merchant", "user_id", "merchant", unique=True),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id"), nullable=False)
+    merchant: Mapped[str] = mapped_column(Text, nullable=False)
+    category: Mapped[str] = mapped_column(String(50), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class BudgetAlertSent(Base):
     """Tracks which (user, category, month) combinations already had an
     80%+ budget alert sent, so /check-budgets doesn't re-alert every run.

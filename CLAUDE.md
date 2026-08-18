@@ -37,7 +37,7 @@ pytest -k "guard"                                              # by keyword
 # Run the app (RUN_MODE=polling for local dev, no public URL needed)
 set -a && source .env && set +a
 export RUN_MODE=polling
-uvicorn app.main:app --reload --host 127.0.0.1 --port "${PORT:-8000}"
+uvicorn app.main:app --reload --host 127.0.0.1 --port "${PORT:-7001}"
 
 # Sanity-check the LLMProvider abstraction against a real model (not mocks)
 python -m scripts.try_decide           # uses LLM_PROVIDER from .env
@@ -88,18 +88,27 @@ lifespan (Telegram `Application` startup/shutdown) + `include_router`.
 
 `app/agent.py` and `app/parser.py` import only `app.llm.base` (the
 `LLMProvider` Protocol + `LLMDecisionError`) and `app.schemas` — never
-`anthropic` or `httpx` directly, and never `app.llm.ollama` /
-`app.llm.claude`. `app.llm.factory.get_provider()` is the only place that
-picks a concrete implementation, based on `settings.llm_provider`. This is
-what makes the dev (Ollama) / prod (Claude) swap safe and keeps
-`tests/test_agent.py` and `tests/test_parser.py` provider-agnostic (they
-drive a scripted `FakeProvider` instead). Both real providers are
-constrained to the *same* JSON Schema (generated from `app.schemas`,
-sanitized via `sanitize_schema_for_llm` to strip keywords like `minimum`/
-`maximum` that structured-output modes don't reliably support) and return
-the same Pydantic model — `tests/test_llm_providers.py` and
-`tests/test_agent_provider_parity.py` assert byte-for-byte equal output from
-both providers given identical mocked model responses.
+`anthropic`, `httpx`, or `google-genai` directly, and never
+`app.llm.ollama` / `app.llm.claude` / `app.llm.gemini`.
+`app.llm.factory.get_provider()` is the only place that picks a concrete
+implementation, based on `settings.llm_provider`. Three interchangeable
+providers exist — Ollama (free, local, dev default), Claude (paid, cloud),
+Gemini (free tier, cloud — the recommended option for a deployment that
+needs to run somewhere other than your own laptop; use `-latest` model
+aliases like `gemini-flash-lite-latest` rather than a pinned dated version,
+since Google retires those for new API keys) — and this boundary is what
+makes the swap safe and keeps `tests/test_agent.py` and
+`tests/test_parser.py` provider-agnostic (they drive a scripted
+`FakeProvider` instead). All three real providers are constrained to the
+*same* JSON Schema (generated from `app.schemas`, sanitized via
+`sanitize_schema_for_llm` to strip keywords like `minimum`/`maximum` that
+structured-output modes don't reliably support) and return the same
+Pydantic model — `tests/test_llm_providers.py`,
+`tests/test_agent_provider_parity.py`, and `tests/test_audit_provider_parity.py`
+assert byte-for-byte equal output across all three providers given
+identical mocked model responses, for every `LLMProvider` method
+(`decide_match`, `parse_transaction`, `extract_receipt`, `interpret_query`,
+`audit_finances`).
 
 ### The decision loop enforces its own conservatism — it doesn't trust the prompt
 
@@ -121,7 +130,50 @@ Note two *different* confidence thresholds exist and happen to share the
 value 0.75: `app.parser._LLM_FALLBACK_THRESHOLD` (regex-parse confidence,
 gates whether the SMS parser calls the LLM at all) and
 `settings.confidence_threshold` (the agent's own guard, above). They are
-independent knobs — don't conflate them when tuning one.
+independent knobs — don't conflate them when tuning one. A third,
+unrelated knob shares a value the same way: `settings.duplicate_charge_window_days`
+(below) also defaults to 2, same as `candidate_date_window_days`, but governs
+a different check entirely.
+
+`reconcile_user`'s per-transaction body is actually two branches, not one
+straight decide→guard pipeline:
+
+- **Merchant-memory short-circuit.** If there are no `_find_candidates`
+  results, no `txn.category_hint`, and `app.merchant_memory.recall_merchant_category`
+  finds a remembered category for `txn.merchant` (learned from a past
+  `ask_user` answer — see `app/expenses.py:resolve_ask_user_answer` below),
+  the LLM is never called at all: a synthetic `auto_log` `MatchDecision` is
+  built directly (confidence 1.0, the remembered category) and only passes
+  through `_apply_duplicate_guard`, **not** `_apply_guard`/`_apply_category_hint`/
+  `_normalize_auto_log_category`. This is deliberate, not an oversight: those
+  three exist to second-guess a *model's* output (hallucination checks,
+  casing normalization, "does this look like a real category") and a
+  memory-sourced decision is already canonical and fully trusted — worse,
+  running it through `_apply_guard` would immediately downgrade any
+  caption-less **photo** repeat straight back to `ask_user` (its photo rule
+  is unconditional on *why* `auto_log` was chosen), silently defeating the
+  feature for photos. Candidates existing, or a `category_hint` already
+  present, both skip the short-circuit — a real ledger match or this
+  transaction's own explicit hint always outrank a historical default.
+- **Normal path** (candidates exist, or no memory, or a hint is present):
+  unchanged — `provider.decide_match` → `_apply_guard` →
+  `_apply_duplicate_guard` → `_apply_category_hint` → `_normalize_auto_log_category`.
+
+**`_apply_duplicate_guard`** is a second, independent guard (not a
+`_apply_guard` branch) that runs in both branches above: it downgrades
+`auto_link`/`auto_log` to `ask_user`, regardless of confidence, whenever
+`_find_recent_duplicate_expense` finds an **existing** expense (linked or
+not — unlike `_find_candidates`, which only ever offers unlinked ones) with
+the same merchant and amount within `duplicate_charge_window_days`. A
+same-merchant, same-amount repeat is often a double-debit, not two separate
+purchases; this is a deliberate friction cost on legitimate same-day repeat
+purchases in exchange for catching that.
+
+Merchant memory is only ever *written* from an `ask_user` resolution
+(`app/expenses.py:resolve_ask_user_answer`, atomic with its existing single
+`session.commit()`), never from the LLM's own `auto_log` guess — the point
+is to learn from the user's explicit choice, not from a possibly-wrong model
+guess.
 
 ### The salary audit is a second agent loop — same conservatism, monthly grain
 
@@ -172,6 +224,29 @@ actual income/spend against. Both `run_audit_all_users` (monthly) and
 the `/run-audit` and `/check-salary-alerts` endpoints — same fail-closed
 `CRON_SECRET` gate and 202-background-task shape as `/reconcile`/`/check-budgets`.
 
+### `Savings` is a category, not a ledger — one flag, four call sites
+
+`app/categories.py:SAVINGS_CATEGORY`/`is_savings_category()` mark money moved
+to another account (e.g. your own savings account) as *not actually spent* —
+a self-transfer, not spend. There's no separate table or status column for
+this; it's a single case-insensitive category-name check that `/spend`
+(`app/reports.py`), the monthly audit's `total_spend`/outlier-baseline/
+anomaly-candidate selection (`app/audit.py:build_snapshot`), the mid-month
+`pace_high` projection, and `/ask`'s `aggregation="net"` query
+(`app/query.py:_run_net_query`) all apply independently — grep
+`is_savings_category`/`SAVINGS_CATEGORY` before changing any one of these,
+since the exclusion has to stay consistent across all four or a self-transfer
+starts looking like overspending in one place but not another. The excluded
+amount isn't just dropped, though: it's surfaced back out separately as
+`moved_to_savings` in the audit snapshot and `net_moved_to_savings` in
+`QueryResult`, so the user still sees where that money went.
+
+`aggregation="net"` (added after the original four `/ask` aggregations) is
+the only one that reads `incomes` as well as `expenses` — it answers "how
+much money do I have left" style questions and is well-defined even with zero
+activity (`"Rs.0.00 left"`), unlike `sum`/`count`/`max`/`list`, which fall
+back to "No expenses found" on an empty result.
+
 ### Table state machine
 
 Core tables (`app/models.py`): `users` (bridges Telegram `chat_id` → an
@@ -198,6 +273,15 @@ index doubles as the once-per-month idempotency guard), and `audit_alerts_sent`
 `budget_alerts_sent` pattern). No status columns on the Phase 4 tables: the
 audit's "have I already done this month" question is answered by row existence
 in `audit_runs`/`audit_alerts_sent`, not a status field.
+
+`merchant_categories` (model `MerchantCategory`) is a different shape again —
+not a dedup table, and not per-month: one row per `(user_id, merchant)`
+(unique index, `merchant` always pre-normalized via
+`app.merchant_memory.normalize_merchant` before it's written or queried), a
+plain key-value memory that a later `ask_user` answer for the same merchant
+*overwrites* rather than appends to. See "The decision loop enforces its own
+conservatism" above for how it's read, and `app/expenses.py:resolve_ask_user_answer`
+for where it's written.
 
 ### SMS parsing: regex-first, direction-aware, LLM fallback for the residue
 
