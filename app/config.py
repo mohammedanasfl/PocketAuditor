@@ -58,6 +58,15 @@ class Settings(BaseSettings):
     # "late" by the mid-month alert check.
     midmonth_alert_grace_days: int = 2
 
+    # --- Access + locale --------------------------------------------------
+    # Comma-separated Telegram chat ids allowed to use the bot, or "*" for
+    # anyone. Empty (the default) allows nobody: the bot replies with the
+    # sender's chat id so the owner can add it. Fail closed — a forgotten
+    # setting must not let strangers spend your LLM budget.
+    allowed_chat_ids: str = ""
+    # All "today" / month boundaries use this timezone (see app/timeutil.py).
+    timezone: str = "Asia/Kolkata"
+
     # --- Runtime ------------------------------------------------------
     run_mode: Literal["webhook", "polling"] = "webhook"
     port: int = 7001

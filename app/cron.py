@@ -32,14 +32,19 @@ async def reconcile_all_users(application: Application) -> None:
     logger.info("background reconcile: %d user(s) to process", len(users))
 
     for user in users:
-        async with SessionLocal() as session:
-            summary = await reconcile_user(session, provider, user.id)
-        logger.info("background reconcile: user=%s — %s", user.id, summary.as_message())
+        try:
+            async with SessionLocal() as session:
+                summary = await reconcile_user(session, provider, user.id)
+            logger.info("background reconcile: user=%s — %s", user.id, summary.as_message())
 
-        for pending in summary.pending_questions:
-            await send_ask_user_message(application.bot, user.telegram_chat_id, pending)
+            for pending in summary.pending_questions:
+                await send_ask_user_message(application.bot, user.telegram_chat_id, pending)
 
-        await application.bot.send_message(chat_id=user.telegram_chat_id, text=summary.as_message())
+            await application.bot.send_message(chat_id=user.telegram_chat_id, text=summary.as_message())
+        except Exception:
+            # One user's failure (e.g. they blocked the bot) must not stop
+            # the run for everyone after them.
+            logger.exception("background reconcile: user=%s failed, continuing with the next user", user.id)
 
 
 async def check_budgets_all_users(application: Application) -> None:
@@ -49,11 +54,14 @@ async def check_budgets_all_users(application: Application) -> None:
     logger.info("background check-budgets: %d user(s) to process", len(users))
 
     for user in users:
-        async with SessionLocal() as session:
-            alerts = await check_budget_alerts(session, user.id)
-        for alert in alerts:
-            logger.info("background check-budgets: user=%s — %s", user.id, alert.category)
-            await application.bot.send_message(chat_id=user.telegram_chat_id, text=alert.as_message())
+        try:
+            async with SessionLocal() as session:
+                alerts = await check_budget_alerts(session, user.id)
+            for alert in alerts:
+                logger.info("background check-budgets: user=%s — %s", user.id, alert.category)
+                await application.bot.send_message(chat_id=user.telegram_chat_id, text=alert.as_message())
+        except Exception:
+            logger.exception("background check-budgets: user=%s failed, continuing with the next user", user.id)
 
 
 async def run_audit_all_users(application: Application) -> None:
@@ -67,14 +75,17 @@ async def run_audit_all_users(application: Application) -> None:
     logger.info("background audit: %d user(s) to process", len(users))
 
     for user in users:
-        async with SessionLocal() as session:
-            result = await run_monthly_audit(session, provider, user.id)
-        if result.status != "completed" or not result.message:
-            logger.info("background audit: user=%s — %s, no message sent", user.id, result.status)
-            continue
-        await application.bot.send_message(chat_id=user.telegram_chat_id, text=result.message)
-        for question in result.questions:
-            await send_audit_question(application.bot, user.telegram_chat_id, question)
+        try:
+            async with SessionLocal() as session:
+                result = await run_monthly_audit(session, provider, user.id)
+            if result.status != "completed" or not result.message:
+                logger.info("background audit: user=%s — %s, no message sent", user.id, result.status)
+                continue
+            await application.bot.send_message(chat_id=user.telegram_chat_id, text=result.message)
+            for question in result.questions:
+                await send_audit_question(application.bot, user.telegram_chat_id, question)
+        except Exception:
+            logger.exception("background audit: user=%s failed, continuing with the next user", user.id)
 
 
 async def check_salary_alerts_all_users(application: Application) -> None:
@@ -87,11 +98,14 @@ async def check_salary_alerts_all_users(application: Application) -> None:
     logger.info("background check-salary-alerts: %d user(s) to process", len(users))
 
     for user in users:
-        async with SessionLocal() as session:
-            alerts = await check_midmonth_alerts(session, user.id)
-        for alert in alerts:
-            logger.info("background check-salary-alerts: user=%s — %s", user.id, alert.alert_type)
-            await application.bot.send_message(chat_id=user.telegram_chat_id, text=alert.as_message())
+        try:
+            async with SessionLocal() as session:
+                alerts = await check_midmonth_alerts(session, user.id)
+            for alert in alerts:
+                logger.info("background check-salary-alerts: user=%s — %s", user.id, alert.alert_type)
+                await application.bot.send_message(chat_id=user.telegram_chat_id, text=alert.as_message())
+        except Exception:
+            logger.exception("background check-salary-alerts: user=%s failed, continuing with the next user", user.id)
 
 
 async def send_weekly_digest_all_users(application: Application) -> None:
@@ -103,7 +117,10 @@ async def send_weekly_digest_all_users(application: Application) -> None:
     logger.info("background send-weekly-digest: %d user(s) to process", len(users))
 
     for user in users:
-        async with SessionLocal() as session:
-            digest = await build_weekly_digest(session, user.id)
-        logger.info("background send-weekly-digest: user=%s", user.id)
-        await application.bot.send_message(chat_id=user.telegram_chat_id, text=digest.as_message())
+        try:
+            async with SessionLocal() as session:
+                digest = await build_weekly_digest(session, user.id)
+            logger.info("background send-weekly-digest: user=%s", user.id)
+            await application.bot.send_message(chat_id=user.telegram_chat_id, text=digest.as_message())
+        except Exception:
+            logger.exception("background send-weekly-digest: user=%s failed, continuing with the next user", user.id)

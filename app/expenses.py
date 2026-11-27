@@ -9,7 +9,7 @@ nothing in there writes to `expenses` directly.
 from __future__ import annotations
 
 import logging
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID
 
@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.merchant_memory import remember_merchant_category
 from app.models import Expense, ReconciliationRun, Transaction
+from app.timeutil import local_today
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,7 @@ async def log_manual_expense(
         category=category,
         merchant=None,
         notes=notes,
-        txn_date=date.today(),
+        txn_date=local_today(),
         created_via="manual",
     )
     session.add(expense)
@@ -42,14 +43,20 @@ async def log_manual_expense(
     return expense
 
 
-async def resolve_ask_user_answer(session: AsyncSession, run_id: UUID, category: str) -> Expense | None:
+async def resolve_ask_user_answer(
+    session: AsyncSession, run_id: UUID, category: str, *, user_id: UUID
+) -> Expense | None:
     """Resolves the inline-button answer to an ask_user question: creates the
     Expense, links it back to the transaction, and flips both the run and
     transaction to their resolved states. Returns None if the run is already
     resolved (or doesn't exist) rather than raising, since a double-tap on
-    an already-answered Telegram message is an expected race, not an error."""
+    an already-answered Telegram message is an expected race, not an error.
+
+    `user_id` is the user who tapped the button: a run belonging to anyone
+    else is treated as not found, so nobody can answer another user's
+    question."""
     run = await session.get(ReconciliationRun, run_id)
-    if run is None or run.status != "open":
+    if run is None or run.user_id != user_id or run.status != "open":
         return None
 
     txn = await session.get(Transaction, run.transaction_id)
@@ -79,15 +86,18 @@ async def resolve_ask_user_answer(session: AsyncSession, run_id: UUID, category:
     return expense
 
 
-async def recategorize_expense(session: AsyncSession, expense_id: UUID, category: str) -> Expense | None:
+async def recategorize_expense(
+    session: AsyncSession, expense_id: UUID, category: str, *, user_id: UUID
+) -> Expense | None:
     """Change an existing expense's category — the monthly audit's anomaly
     ask-flow (the `acat:` inline buttons). Distinct from resolve_ask_user_answer,
     which *creates* an expense from a pending transaction: here the expense
     already exists (auto_logged or manual) and only its category changes.
     Returns None if the expense no longer exists (an expected stale-button
-    race, not an error)."""
+    race, not an error). An expense belonging to another user is treated the
+    same as a missing one."""
     expense = await session.get(Expense, expense_id)
-    if expense is None:
+    if expense is None or expense.user_id != user_id:
         return None
     expense.category = category
     await session.commit()

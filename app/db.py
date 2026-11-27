@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
@@ -34,6 +35,20 @@ engine = create_async_engine(
 )
 
 SessionLocal = async_sessionmaker(bind=engine, expire_on_commit=False, class_=AsyncSession)
+
+
+async def insert_once(session: AsyncSession, row: Base) -> bool:
+    """Insert a row that a unique index protects (an "already sent" or
+    "already audited" marker). Returns False instead of crashing when the row
+    already exists — e.g. two requests racing to send the same alert. Only
+    the first one wins; the second just skips."""
+    session.add(row)
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        return False
+    return True
 
 
 async def get_session() -> AsyncGenerator[AsyncSession, None]:

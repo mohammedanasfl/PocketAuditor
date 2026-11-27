@@ -17,7 +17,9 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db import insert_once
 from app.models import Budget, BudgetAlertSent, Expense
+from app.timeutil import local_today
 
 _ALERT_THRESHOLD_PCT = Decimal("0.8")
 
@@ -88,7 +90,7 @@ async def _month_spend_by_category(session: AsyncSession, user_id: UUID, month_s
 
 
 async def get_budget_statuses(session: AsyncSession, user_id: UUID, *, today: date | None = None) -> list[BudgetStatus]:
-    today = today or date.today()
+    today = today or local_today()
     month_start = today.replace(day=1)
 
     budgets = (
@@ -118,7 +120,7 @@ async def check_budget_alerts(session: AsyncSession, user_id: UUID, *, today: da
     only ever iterates rows that exist in `budgets`, never all categories
     seen in `expenses`.
     """
-    today = today or date.today()
+    today = today or local_today()
     month_start = today.replace(day=1)
     days_in_month = calendar.monthrange(today.year, today.month)[1]
     days_left = days_in_month - today.day
@@ -150,8 +152,9 @@ async def check_budget_alerts(session: AsyncSession, user_id: UUID, *, today: da
         if already_sent is not None:
             continue
 
-        session.add(BudgetAlertSent(user_id=user_id, category=budget.category, month=month_start))
-        await session.commit()
+        marker = BudgetAlertSent(user_id=user_id, category=budget.category, month=month_start)
+        if not await insert_once(session, marker):
+            continue  # another run sent this alert a moment ago
         alerts.append(
             BudgetAlert(category=budget.category, spent=spent, monthly_limit=budget.monthly_limit, days_left=days_left)
         )

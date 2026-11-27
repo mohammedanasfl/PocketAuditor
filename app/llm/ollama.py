@@ -14,7 +14,6 @@ from __future__ import annotations
 import base64
 import json
 import logging
-from datetime import date
 
 import httpx
 from pydantic import ValidationError
@@ -33,6 +32,7 @@ from app.llm.prompts import (
     build_parse_payload,
 )
 from app.schemas import AuditReport, ExtractedReceipt, LLMExtraction, MatchDecision, QueryIntent
+from app.timeutil import local_today
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +104,7 @@ class OllamaProvider:
 
     async def parse_transaction(self, raw_text: str) -> LLMExtraction:
         logger.info("Ollama.parse_transaction: model=%s", self._model)
-        payload = build_parse_payload(raw_text, reference_date=date.today())
+        payload = build_parse_payload(raw_text, reference_date=local_today())
         schema = LLMExtraction.model_json_schema()
         last_error: Exception | None = None
         for attempt in range(1, _MAX_ATTEMPTS + 1):
@@ -181,7 +181,7 @@ class OllamaProvider:
 
     async def interpret_query(self, question: str) -> QueryIntent:
         logger.info("Ollama.interpret_query: model=%s", self._model)
-        payload = build_interpret_query_payload(question, reference_date=date.today())
+        payload = build_interpret_query_payload(question, reference_date=local_today())
         schema = QueryIntent.model_json_schema()
         last_error: Exception | None = None
         for attempt in range(1, _MAX_ATTEMPTS + 1):

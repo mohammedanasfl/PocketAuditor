@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import date
 
+import httpx
 from google import genai
+from google.genai import errors as genai_errors
 from google.genai import types
 from pydantic import ValidationError
 
@@ -30,6 +31,7 @@ from app.llm.prompts import (
     build_parse_payload,
 )
 from app.schemas import AuditReport, ExtractedReceipt, LLMExtraction, MatchDecision, QueryIntent
+from app.timeutil import local_today
 
 logger = logging.getLogger(__name__)
 
@@ -45,18 +47,23 @@ class GeminiProvider:
         self._model = model or settings.llm_model
 
     async def _generate_json(self, system: str, contents: list, schema: dict) -> str:
-        response = await self._client.aio.models.generate_content(
-            model=self._model,
-            contents=contents,
-            config=types.GenerateContentConfig(
-                system_instruction=system,
-                response_mime_type="application/json",
-                response_json_schema=sanitize_schema_for_llm(schema),
-                # No tools are ever passed here, so disable automatic function
-                # calling outright rather than let the SDK warn on every call.
-                automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-            ),
-        )
+        try:
+            response = await self._client.aio.models.generate_content(
+                model=self._model,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    system_instruction=system,
+                    response_mime_type="application/json",
+                    response_json_schema=sanitize_schema_for_llm(schema),
+                    # No tools are ever passed here, so disable automatic function
+                    # calling outright rather than let the SDK warn on every call.
+                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+                ),
+            )
+        except (genai_errors.APIError, httpx.HTTPError) as exc:
+            # Rate limits, 5xx, bad key — callers only ever handle
+            # LLMDecisionError, so never let an SDK exception escape.
+            raise LLMDecisionError(f"Gemini request failed: {exc}") from exc
         if response.text is None:
             raise LLMDecisionError("Gemini returned no text content (likely blocked or truncated)")
         return response.text
@@ -75,7 +82,7 @@ class GeminiProvider:
 
     async def parse_transaction(self, raw_text: str) -> LLMExtraction:
         logger.info("Gemini.parse_transaction: model=%s", self._model)
-        payload = build_parse_payload(raw_text, reference_date=date.today())
+        payload = build_parse_payload(raw_text, reference_date=local_today())
         content = await self._generate_json(PARSE_SYSTEM, [payload], LLMExtraction.model_json_schema())
         try:
             extraction = LLMExtraction.model_validate_json(content)
@@ -127,7 +134,7 @@ class GeminiProvider:
 
     async def interpret_query(self, question: str) -> QueryIntent:
         logger.info("Gemini.interpret_query: model=%s", self._model)
-        payload = build_interpret_query_payload(question, reference_date=date.today())
+        payload = build_interpret_query_payload(question, reference_date=local_today())
         content = await self._generate_json(INTERPRET_QUERY_SYSTEM, [payload], QueryIntent.model_json_schema())
         try:
             intent = QueryIntent.model_validate_json(content)

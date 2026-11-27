@@ -43,6 +43,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
+    if result.outcome == "already_seen":
+        await update.message.reply_text("I already have this SMS saved — skipping it so it isn't counted twice.")
+        return
+
     if result.outcome == "income_recorded":
         source_note = f" from {result.merchant}" if result.merchant else ""
         await update.message.reply_text(

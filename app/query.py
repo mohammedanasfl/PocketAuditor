@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.categories import SAVINGS_CATEGORY
 from app.models import Expense, Income
 from app.schemas import QueryIntent
+from app.timeutil import local_today
 
 logger = logging.getLogger(__name__)
 
@@ -212,7 +213,7 @@ async def run_query(
     query below (category, date bounds) goes through SQLAlchemy's parameter
     binding, never string concatenation — so nothing in `intent.category`,
     however it's spelled, can affect the query's structure."""
-    today = today or date.today()
+    today = today or local_today()
     start, end = resolve_date_range(intent, today)
 
     if intent.aggregation == "net":

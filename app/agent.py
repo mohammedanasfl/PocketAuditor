@@ -8,6 +8,7 @@ stay cheap.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -22,11 +23,24 @@ from app.config import settings
 from app.llm.base import LLMDecisionError, LLMProvider
 from app.merchant_memory import recall_merchant_category
 from app.models import Expense, ReconciliationRun, Transaction
+from app.privacy import redact
 from app.schemas import MatchDecision
 
 logger = logging.getLogger(__name__)
 
 _MAX_CANDIDATES = 3
+
+# One lock per user: if /reconcile and the weekly cron run at the same time,
+# the second waits for the first instead of both processing the same
+# pending transactions. (The app runs as a single process, so an in-memory
+# lock is enough.)
+_user_locks: dict[UUID, asyncio.Lock] = {}
+
+
+def _lock_for(user_id: UUID) -> asyncio.Lock:
+    if user_id not in _user_locks:
+        _user_locks[user_id] = asyncio.Lock()
+    return _user_locks[user_id]
 
 
 @dataclass
@@ -71,7 +85,7 @@ def _transaction_to_dict(txn: Transaction) -> dict:
         "amount": str(txn.amount),
         "merchant": txn.merchant,
         "txn_date": txn.txn_date.isoformat(),
-        "raw_text": txn.raw_text,
+        "raw_text": redact(txn.raw_text),
         "category_hint": txn.category_hint,
     }
 
@@ -308,7 +322,13 @@ async def _act(
 async def reconcile_user(session: AsyncSession, provider: LLMProvider, user_id: UUID) -> RunSummary:
     """Run the full perceive -> compare -> decide -> act loop over every
     pending transaction for one user. A single transaction's LLM failure is
-    recorded and skipped rather than aborting the whole run."""
+    recorded and skipped rather than aborting the whole run. Only one run per
+    user at a time (see _user_locks)."""
+    async with _lock_for(user_id):
+        return await _reconcile_user_locked(session, provider, user_id)
+
+
+async def _reconcile_user_locked(session: AsyncSession, provider: LLMProvider, user_id: UUID) -> RunSummary:
     summary = RunSummary()
 
     stmt = (

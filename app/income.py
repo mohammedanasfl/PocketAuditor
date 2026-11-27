@@ -20,6 +20,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Income
+from app.timeutil import local_today
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +82,7 @@ async def get_income_summary(session: AsyncSession, user_id: UUID, *, today: dat
     """Income totals for the current month, the previous completed month, the
     current year, and all time. Takes an injectable `today` so tests can pin
     the clock (same convention as app/budgets.py and app/query.py)."""
-    today = today or date.today()
+    today = today or local_today()
     month_start = today.replace(day=1)
     last_month_end = month_start - timedelta(days=1)
     last_month_start = last_month_end.replace(day=1)

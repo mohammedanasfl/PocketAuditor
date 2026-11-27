@@ -37,9 +37,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.categories import SAVINGS_CATEGORY, is_savings_category
 from app.config import settings
+from app.db import insert_once
 from app.llm.base import LLMDecisionError, LLMProvider
 from app.models import AuditAlertSent, AuditRun, Budget, Expense, Income, SalaryProfile
 from app.schemas import AuditReport
+from app.timeutil import local_today
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +54,9 @@ _UNCATEGORIZED = "Uncategorized"
 # Don't project a spending pace from too few days — one big day-2 purchase
 # shouldn't burn the month's single pace alert on a false alarm.
 _MIN_DAY_FOR_PACE_ALERT = 7
+# Lowest savings rate we store/show: "-99999.99%" already means "spent far
+# more than earned"; anything lower overflows the audit_runs column.
+_MIN_SAVINGS_RATE = Decimal("-99999.99")
 
 
 @dataclass
@@ -276,7 +281,13 @@ def build_snapshot(
     total_spend = sum((e.amount for e in expenses if not is_savings_category(e.category)), Decimal("0"))
     moved_to_savings = sum((e.amount for e in expenses if is_savings_category(e.category)), Decimal("0"))
     net_saved = total_income - total_spend
-    savings_rate = (net_saved / total_income * 100).quantize(Decimal("0.01")) if total_income > 0 else None
+    savings_rate = None
+    if total_income > 0:
+        savings_rate = (net_saved / total_income * 100).quantize(Decimal("0.01"))
+        # Overspending a tiny income (e.g. only a Rs.1 cashback recorded) gives
+        # rates like -4,999,900%. Cap it so it fits the audit_runs column
+        # (Numeric(7,2)) instead of crashing the audit on Postgres.
+        savings_rate = max(savings_rate, _MIN_SAVINGS_RATE)
 
     this_by_cat = _group_by_category(expenses)
     prev_by_cat = _group_by_category(prev_expenses)
@@ -387,7 +398,7 @@ async def run_monthly_audit(
     (user_id, period_month) row in audit_runs is both the trail and the
     once-per-month guard, so a re-run returns 'already_audited' without a
     second LLM call — same insert-guards-the-send shape as check_budget_alerts."""
-    today = today or date.today()
+    today = today or local_today()
     month_start, month_end = _last_completed_month(today)
     prev_start, prev_end = _last_completed_month(month_start)
     label = f"{calendar.month_name[month_start.month]} {month_start.year}"
@@ -453,8 +464,15 @@ async def run_monthly_audit(
         savings_rate=snapshot.savings_rate,
         summary=report.summary if report is not None else None,
     )
-    session.add(run)
-    await session.commit()
+    if not await insert_once(session, run):
+        # A second /audit tap raced this one and saved first — no double report.
+        logger.info("run_monthly_audit: user=%s %s was audited by a parallel run", user_id, label)
+        return MonthlyAuditResult(
+            status="already_audited",
+            period_month=month_start,
+            period_label=label,
+            message=f"🔍 {label} was already audited a moment ago.",
+        )
 
     message = _format_message(snapshot, report)
     logger.info(
@@ -498,7 +516,7 @@ async def check_midmonth_alerts(
     Returns [] when the user has no salary profile — there's nothing to
     compare actual income/spend against, so no alert can be grounded.
     """
-    today = today or date.today()
+    today = today or local_today()
     month_start = today.replace(day=1)
 
     profile = (
@@ -578,8 +596,9 @@ async def check_midmonth_alerts(
         ).scalar_one_or_none()
         if already_sent is not None:
             continue
-        session.add(AuditAlertSent(user_id=user_id, month=month_start, alert_type=alert.alert_type))
-        await session.commit()
+        marker = AuditAlertSent(user_id=user_id, month=month_start, alert_type=alert.alert_type)
+        if not await insert_once(session, marker):
+            continue  # another run sent this alert a moment ago
         fired.append(alert)
 
     return fired

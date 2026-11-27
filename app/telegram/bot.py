@@ -5,11 +5,12 @@ Doesn't decide webhook vs polling — that's app.main's job (RUN_MODE).
 
 from __future__ import annotations
 
-from telegram import BotCommand
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
+from telegram import BotCommand, Update
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, TypeHandler, filters
 
 from app.config import settings
 from app.llm.factory import get_provider
+from app.telegram.access import block_unknown_chats, log_handler_error
 from app.telegram.handlers import (
     handle_ask_command,
     handle_audit_category_callback,
@@ -48,6 +49,9 @@ BOT_COMMANDS = [
 def build_application() -> Application:
     application = Application.builder().token(settings.telegram_bot_token).build()
     application.bot_data["llm_provider"] = get_provider()
+    # group=-1 runs before every normal handler (group 0).
+    application.add_handler(TypeHandler(Update, block_unknown_chats), group=-1)
+    application.add_error_handler(log_handler_error)
     application.add_handler(CommandHandler("start", handle_start_command))
     application.add_handler(CommandHandler("help", handle_help_command))
     application.add_handler(CommandHandler("reconcile", handle_reconcile_command))

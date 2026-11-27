@@ -682,7 +682,7 @@ async def test_resolving_ask_user_remembers_the_merchant_for_next_time(db_sessio
         user.id,
     )
     run = (await db_session.execute(select(ReconciliationRun))).scalar_one()
-    await resolve_ask_user_answer(db_session, run.id, "Food")
+    await resolve_ask_user_answer(db_session, run.id, "Food", user_id=user.id)
 
     await _make_transaction(db_session, user, amount="120.00", merchant="New Cafe", txn_date=date(2026, 8, 8))
     summary = await reconcile_user(db_session, _ScriptedProvider([]), user.id)

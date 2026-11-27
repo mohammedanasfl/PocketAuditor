@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.categories import SAVINGS_CATEGORY
 from app.models import Expense
+from app.timeutil import local_today
 
 
 @dataclass
@@ -54,8 +55,8 @@ async def get_spend_summary(session: AsyncSession, user_id: UUID, *, today: date
     are the current calendar month/year — all relative to today (overridable
     for tests and for app/digest.py, which needs the same "today" its own
     week-scoped queries use, not a second, independently-evaluated
-    date.today())."""
-    today = today or date.today()
+    local_today())."""
+    today = today or local_today()
     week_start = today - timedelta(days=today.weekday())
     month_start = today.replace(day=1)
     year_start = today.replace(month=1, day=1)

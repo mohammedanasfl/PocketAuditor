@@ -5,8 +5,8 @@ from __future__ import annotations
 import base64
 import json
 import logging
-from datetime import date
 
+import anthropic
 from anthropic import AsyncAnthropic
 from pydantic import ValidationError
 
@@ -24,6 +24,7 @@ from app.llm.prompts import (
     build_parse_payload,
 )
 from app.schemas import AuditReport, ExtractedReceipt, LLMExtraction, MatchDecision, QueryIntent
+from app.timeutil import local_today
 
 logger = logging.getLogger(__name__)
 
@@ -48,21 +49,28 @@ class ClaudeProvider:
         # MessageParam/OutputConfigParam TypedDicts closely enough for mypy's
         # overload resolution — tests/test_llm_providers.py exercises the
         # actual request shape against a mocked endpoint instead.
-        response = await self._client.messages.create(  # type: ignore[call-overload]
-            model=self._model,
-            max_tokens=1024,
-            system=system,
-            messages=[{"role": "user", "content": user}],
-            output_config={
-                "effort": "low",
-                "format": {
-                    "type": "json_schema",
-                    "schema": sanitize_schema_for_llm(schema),
+        try:
+            response = await self._client.messages.create(  # type: ignore[call-overload]
+                model=self._model,
+                max_tokens=1024,
+                system=system,
+                messages=[{"role": "user", "content": user}],
+                output_config={
+                    "effort": "low",
+                    "format": {
+                        "type": "json_schema",
+                        "schema": sanitize_schema_for_llm(schema),
+                    },
                 },
-            },
-        )
-        text_block = next(block for block in response.content if block.type == "text")
-        return text_block.text
+            )
+        except anthropic.APIError as exc:
+            # Network errors, rate limits, 5xx — callers only ever handle
+            # LLMDecisionError, so never let an SDK exception escape.
+            raise LLMDecisionError(f"Claude request failed: {exc}") from exc
+        for block in response.content:
+            if block.type == "text":
+                return block.text
+        raise LLMDecisionError("Claude returned no text content")
 
     async def decide_match(self, transaction: dict, candidates: list[dict]) -> MatchDecision:
         logger.info("Claude.decide_match: model=%s candidates=%d", self._model, len(candidates))
@@ -78,7 +86,7 @@ class ClaudeProvider:
 
     async def parse_transaction(self, raw_text: str) -> LLMExtraction:
         logger.info("Claude.parse_transaction: model=%s", self._model)
-        payload = build_parse_payload(raw_text, reference_date=date.today())
+        payload = build_parse_payload(raw_text, reference_date=local_today())
         content = await self._create_json(PARSE_SYSTEM, payload, LLMExtraction.model_json_schema())
         try:
             extraction = LLMExtraction.model_validate_json(content)
@@ -134,7 +142,7 @@ class ClaudeProvider:
 
     async def interpret_query(self, question: str) -> QueryIntent:
         logger.info("Claude.interpret_query: model=%s", self._model)
-        payload = build_interpret_query_payload(question, reference_date=date.today())
+        payload = build_interpret_query_payload(question, reference_date=local_today())
         content = await self._create_json(INTERPRET_QUERY_SYSTEM, payload, QueryIntent.model_json_schema())
         try:
             intent = QueryIntent.model_validate_json(content)

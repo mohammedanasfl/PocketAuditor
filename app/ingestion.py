@@ -15,21 +15,37 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from typing import Literal
+from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.categories import normalize_category
 from app.income import record_income
 from app.llm.base import LLMDecisionError, LLMProvider
-from app.models import Transaction, User
+from app.models import Income, Transaction, User
 from app.parser import ParseError, parse_sms
+from app.timeutil import local_today
 
 logger = logging.getLogger(__name__)
 
 
+async def _sms_already_saved(session: AsyncSession, user_id: UUID, raw_text: str) -> bool:
+    """True if this exact SMS text is already saved as a transaction or an income."""
+    txn_match = await session.execute(
+        select(Transaction.id).where(Transaction.user_id == user_id, Transaction.raw_text == raw_text).limit(1)
+    )
+    if txn_match.first() is not None:
+        return True
+    income_match = await session.execute(
+        select(Income.id).where(Income.user_id == user_id, Income.raw_text == raw_text).limit(1)
+    )
+    return income_match.first() is not None
+
+
 @dataclass
 class SmsIngestResult:
-    outcome: Literal["transaction_created", "income_recorded", "parse_error"]
+    outcome: Literal["transaction_created", "income_recorded", "parse_error", "already_seen"]
     amount: Decimal | None = None
     merchant: str | None = None
     txn_date: date | None = None
@@ -39,6 +55,12 @@ async def ingest_sms_transaction(
     session: AsyncSession, user: User, raw_text: str, provider: LLMProvider
 ) -> SmsIngestResult:
     """Plain-text message handling: treat as forwarded SMS/UPI text."""
+    if await _sms_already_saved(session, user.id, raw_text):
+        # The same SMS forwarded twice would otherwise count the money twice
+        # (a salary forwarded twice doubles your income).
+        logger.info("user=%s: this exact SMS was already saved, skipping", user.id)
+        return SmsIngestResult(outcome="already_seen")
+
     try:
         parsed = await parse_sms(raw_text, provider)
     except ParseError:
@@ -126,7 +148,7 @@ async def ingest_photo_transaction(
         )
         return PhotoIngestResult(outcome="low_confidence")
 
-    txn_date = receipt.txn_date or date.today()
+    txn_date = receipt.txn_date or local_today()
     # A caption is the user explicitly telling us the category up front (e.g.
     # sending a receipt photo with "Food" as the caption) — trust it over
     # letting the agent loop guess one later. normalize_category rejects
