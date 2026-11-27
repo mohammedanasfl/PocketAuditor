@@ -4,11 +4,12 @@ Run on 2026-11-27.
 
 | Metric | Value |
 |---|---|
-| Correct | 5/20 (25%) |
+| Correct | 7/24 (29%) |
 | Unsafe (wrong data written) | 0 |
 | Unnecessary asks | 0 |
-| LLM calls | 15 (0.8 per scenario) |
+| LLM calls | 17 (0.7 per scenario) |
 | LLM time | 0.0s (0.00s per scenario) |
+| Agent tokens | 0 (0 per scenario) |
 
 | Scenario | Expected | Got | Result |
 |---|---|---|---|
@@ -32,3 +33,7 @@ Run on 2026-11-27.
 | r18_prompt_injection_in_sms | ask_user | error | ❌ |
 | r19_atm_cash | ask_user | error | ❌ |
 | r20_caption_free_unknown_shop | ask_user | error | ❌ |
+| r21_transfer_to_own_savings | savings_transfer | savings_transfer | ✅ |
+| r22_withdrawal_from_own_savings | savings_withdrawal | savings_withdrawal | ✅ |
+| r23_spend_from_savings_account_is_spend | auto_log Food | error | ❌ |
+| r24_transfer_to_unknown_account | ask_user | error | ❌ |

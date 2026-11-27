@@ -186,6 +186,9 @@ class GeminiProvider:
         if not response.candidates or response.candidates[0].content is None:
             raise LLMDecisionError("Gemini returned no content (likely blocked)")
         content = response.candidates[0].content
+        if not content.parts:
+            # e.g. finish reason SAFETY or MALFORMED_FUNCTION_CALL
+            raise LLMDecisionError("Gemini returned an empty reply")
 
         text_parts: list[str] = []
         tool_calls: list[ToolCall] = []
@@ -202,7 +205,8 @@ class GeminiProvider:
             text="".join(text_parts).strip(),
             tool_calls=tool_calls,
             input_tokens=(usage.prompt_token_count or 0) if usage else 0,
-            output_tokens=(usage.candidates_token_count or 0) if usage else 0,
+            # Thinking tokens are billed as output too.
+            output_tokens=((usage.candidates_token_count or 0) + (usage.thoughts_token_count or 0)) if usage else 0,
             raw=content,
         )
 

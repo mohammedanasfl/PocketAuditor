@@ -20,6 +20,7 @@ from app.config import settings
 from app.db import SessionLocal
 from app.digest import build_weekly_digest
 from app.models import User
+from app.month_plan import check_money_alerts
 from app.telegram.access import is_chat_allowed
 from app.telegram.handlers import send_ask_user_message, send_audit_question
 
@@ -44,7 +45,7 @@ async def reconcile_all_users(application: Application) -> None:
     for user in users:
         try:
             async with SessionLocal() as session:
-                summary = await reconcile(session, provider, user.id)
+                summary = await reconcile(session, provider, user.id, trigger="cron")
             logger.info("background reconcile: user=%s — %s", user.id, summary.as_message())
 
             for pending in summary.pending_questions:
@@ -110,7 +111,8 @@ async def check_salary_alerts_all_users(application: Application) -> None:
     for user in users:
         try:
             async with SessionLocal() as session:
-                alerts = await check_midmonth_alerts(session, user.id)
+                alerts: list = await check_midmonth_alerts(session, user.id)
+                alerts += await check_money_alerts(session, user.id)
             for alert in alerts:
                 logger.info("background check-salary-alerts: user=%s — %s", user.id, alert.alert_type)
                 await application.bot.send_message(chat_id=user.telegram_chat_id, text=alert.as_message())

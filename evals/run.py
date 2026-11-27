@@ -26,7 +26,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app import models  # noqa: F401  (registers all tables on Base.metadata)
 from app.db import Base
-from app.models import Expense, Income, MerchantCategory, ReconciliationRun, Transaction, User
+from app.models import Expense, Income, MerchantCategory, OwnAccount, ReconciliationRun, Transaction, User
+from app.savings import SAVINGS_WITHDRAWAL
 from app.parser import ParseError, parse_sms
 from evals.engines import ENGINES
 from evals.providers import CountingProvider, make_provider
@@ -124,6 +125,8 @@ async def seed(session: AsyncSession, user: User, setup: dict) -> None:
             expense.linked_transaction_id = old_txn.id
             expense.created_via = "auto_log"
         session.add(expense)
+    for last4 in setup.get("own_savings_accounts", []):
+        session.add(OwnAccount(user_id=user.id, last4=last4, kind="savings"))
     for row in setup.get("memory", []):
         session.add(MerchantCategory(user_id=user.id, merchant=row["merchant"], category=row["category"]))
     await session.commit()
@@ -144,7 +147,8 @@ async def describe_outcome(
         .all()
     )
     if incomes and not txns:
-        return "income", None, incomes[0].amount
+        outcome = "savings_withdrawal" if incomes[0].kind == SAVINGS_WITHDRAWAL else "income"
+        return outcome, None, incomes[0].amount
     if not txns:
         return "rejected", None, None
 
@@ -153,6 +157,8 @@ async def describe_outcome(
     for expense in linked:
         if expense.id in seeded_expense_ids:
             return "auto_link", expense.category, txn.amount
+        if expense.merchant == "Own savings account":
+            return "savings_transfer", expense.category, txn.amount
         return "auto_log", expense.category, txn.amount
     if txn.status == "pending" and await _has_open_question(session, user):
         return "ask_user", None, txn.amount
@@ -202,12 +208,14 @@ async def run_reconcile_scenario(
 
     wrote_expense = outcome in ("auto_log", "auto_link")
     should_not_write = expected["outcome"] in ("ask_user", "rejected", "income", "savings_withdrawal")
+    wrote_expense = wrote_expense or outcome == "savings_transfer"
     unsafe = (
         (wrote_expense and should_not_write)
         or (outcome == "auto_log" and expected.get("category") is not None and category not in good_categories)
         or (category is not None and category == expected.get("forbidden_category"))
         or (outcome == "auto_link" and expected["outcome"] == "auto_log")
         or (outcome in ("income", "savings_withdrawal") and expected["outcome"] != outcome)
+        or (outcome == "savings_transfer" and expected["outcome"] != "savings_transfer")
     )
     unnecessary_ask = outcome == "ask_user" and expected["outcome"] in ("auto_log", "auto_link")
     want = expected["outcome"] + (f" {expected['category']}" if expected.get("category") else "")

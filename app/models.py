@@ -112,6 +112,11 @@ class Income(Base):
     # 'auto' (from a forwarded SMS) | 'manual' (reserved for a future manual
     # income-entry command)
     created_via: Mapped[str] = mapped_column(String(20), nullable=False, default="auto", server_default="auto")
+    # What kind of money-in this is (set at ingestion, app/savings.py):
+    # 'salary' | 'refund' | 'other' | 'savings_withdrawal'. A withdrawal from
+    # your own savings account is NOT income — every income total skips it
+    # (see app/income.py:COUNTS_AS_INCOME).
+    kind: Mapped[str] = mapped_column(String(20), nullable=False, default="other", server_default="other")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -299,4 +304,57 @@ class AgentStep(Base):
     input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     latency_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class OwnAccount(Base):
+    """One of the user's own bank accounts, by its last 4 digits. Lets the
+    app recognize transfers between your own accounts — money moved to
+    savings is not spending, money taken back from savings is not income."""
+
+    __tablename__ = "own_accounts"
+    __table_args__ = (Index("ix_own_accounts_user_last4", "user_id", "last4", unique=True),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id"), nullable=False)
+    last4: Mapped[str] = mapped_column(String(4), nullable=False)
+    # 'savings' for now — the only kind the savings flow needs.
+    kind: Mapped[str] = mapped_column(String(20), nullable=False, default="savings")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class PendingAction(Base):
+    """A change the chat agent wants to make, waiting for the user's Yes/No.
+
+    The policy layer never lets a chat write run directly: it is stored here
+    and sent with buttons. On "Yes" the stored action is executed by plain
+    code (app/agent_core/actions.py) — the model is not involved again."""
+
+    __tablename__ = "pending_actions"
+    __table_args__ = (Index("ix_pending_actions_user_status", "user_id", "status"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id"), nullable=False)
+    tool_name: Mapped[str] = mapped_column(String(60), nullable=False)
+    args: Mapped[str] = mapped_column(Text, nullable=False)  # JSON
+    # What the user is asked, e.g. "Set your Food budget to Rs.4,000?"
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    # 'waiting' | 'approved' | 'rejected'
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="waiting")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ConversationMessage(Base):
+    """Short-term chat memory: the last few messages between the user and
+    the chat agent, so follow-ups like "and last month?" make sense."""
+
+    __tablename__ = "conversation_messages"
+    __table_args__ = (Index("ix_conversation_messages_user", "user_id", "created_at"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id"), nullable=False)
+    # 'user' | 'assistant'
+    role: Mapped[str] = mapped_column(String(10), nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

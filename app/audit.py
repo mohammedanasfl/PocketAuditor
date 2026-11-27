@@ -40,6 +40,7 @@ from app.config import settings
 from app.db import insert_once
 from app.llm.base import LLMDecisionError, LLMProvider
 from app.models import AuditAlertSent, AuditRun, Budget, Expense, Income, SalaryProfile
+from app.savings import SAVINGS_WITHDRAWAL
 from app.schemas import AuditReport
 from app.timeutil import local_today
 
@@ -91,6 +92,7 @@ class FinancialSnapshot:
     category_breakdown: list[dict]
     budgets: list[dict]
     anomaly_candidates: list[dict]
+    taken_back_from_savings: Decimal = Decimal("0")
 
     @property
     def has_data(self) -> bool:
@@ -104,6 +106,7 @@ class FinancialSnapshot:
             "total_income": str(self.total_income),
             "total_spend": str(self.total_spend),
             "moved_to_savings": str(self.moved_to_savings),
+            "taken_back_from_savings": str(self.taken_back_from_savings),
             "net_saved": str(self.net_saved),
             "savings_rate_pct": None if self.savings_rate is None else str(self.savings_rate),
             "expected_salary": None if self.expected_salary is None else str(self.expected_salary),
@@ -277,7 +280,10 @@ def build_snapshot(
     Savings-category expenses are excluded from total_spend and tracked
     separately as moved_to_savings: that money was moved to another account,
     not spent, so counting it as spend would understate net_saved."""
-    total_income = sum((i.amount for i in incomes), Decimal("0"))
+    # Money taken back from your own savings account is not income.
+    real_incomes = [i for i in incomes if i.kind != SAVINGS_WITHDRAWAL]
+    taken_back_from_savings = sum((i.amount for i in incomes if i.kind == SAVINGS_WITHDRAWAL), Decimal("0"))
+    total_income = sum((i.amount for i in real_incomes), Decimal("0"))
     total_spend = sum((e.amount for e in expenses if not is_savings_category(e.category)), Decimal("0"))
     moved_to_savings = sum((e.amount for e in expenses if is_savings_category(e.category)), Decimal("0"))
     net_saved = total_income - total_spend
@@ -310,7 +316,7 @@ def build_snapshot(
     salary_received: bool | None = None
     salary_received_amount: Decimal | None = None
     if expected_salary is not None and expected_salary > 0:
-        salary_received_amount = _find_salary_credit(incomes, expected_salary, salary_tolerance_pct)
+        salary_received_amount = _find_salary_credit(real_incomes, expected_salary, salary_tolerance_pct)
         salary_received = salary_received_amount is not None
 
     return FinancialSnapshot(
@@ -328,6 +334,7 @@ def build_snapshot(
         category_breakdown=category_breakdown,
         budgets=[{"category": b.category, "monthly_limit": str(b.monthly_limit)} for b in budgets],
         anomaly_candidates=_select_anomaly_candidates(expenses),
+        taken_back_from_savings=taken_back_from_savings,
     )
 
 
@@ -356,6 +363,10 @@ def _format_message(snapshot: FinancialSnapshot, report: AuditReport | None) -> 
     lines.append(f"Spending: Rs.{snapshot.total_spend:,.2f}")
     if snapshot.moved_to_savings > 0:
         lines.append(f"Moved to savings: Rs.{snapshot.moved_to_savings:,.2f} (not counted as spend)")
+    if snapshot.taken_back_from_savings > 0:
+        lines.append(f"Taken back from savings: Rs.{snapshot.taken_back_from_savings:,.2f} (not counted as income)")
+        kept = snapshot.moved_to_savings - snapshot.taken_back_from_savings
+        lines.append(f"Kept in savings this month: Rs.{kept:,.2f}")
     rate = "" if snapshot.savings_rate is None else f" ({snapshot.savings_rate:.0f}% of income)"
     verb = "saved" if snapshot.net_saved >= 0 else "overspent by"
     amount = snapshot.net_saved if snapshot.net_saved >= 0 else -snapshot.net_saved
@@ -529,7 +540,10 @@ async def check_midmonth_alerts(
         (
             await session.execute(
                 select(Income).where(
-                    Income.user_id == user_id, Income.txn_date >= month_start, Income.txn_date <= today
+                    Income.user_id == user_id,
+                    Income.txn_date >= month_start,
+                    Income.txn_date <= today,
+                    Income.kind != SAVINGS_WITHDRAWAL,
                 )
             )
         )

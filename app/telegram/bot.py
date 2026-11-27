@@ -21,7 +21,10 @@ from app.telegram.handlers import (
     handle_income_command,
     handle_log_command,
     handle_message,
+    handle_myaccount_command,
+    handle_pending_action_callback,
     handle_photo_message,
+    handle_plan_command,
     handle_reconcile_command,
     handle_salary_command,
     handle_setbudget_command,
@@ -42,7 +45,9 @@ BOT_COMMANDS = [
     BotCommand("log", "Manually log cash/other spend, e.g. /log Food 900"),
     BotCommand("setbudget", "Set a monthly limit, e.g. /setbudget Food 4000"),
     BotCommand("budgets", "See your limits and this month's spend per category"),
-    BotCommand("ask", "Ask about your spending, e.g. /ask how much on food this week"),
+    BotCommand("ask", "Ask anything — or just type your question"),
+    BotCommand("plan", "This month: saved, spending money, money left"),
+    BotCommand("myaccount", "Your savings account, e.g. /myaccount savings 4321"),
 ]
 
 
@@ -63,8 +68,11 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("setbudget", handle_setbudget_command))
     application.add_handler(CommandHandler("budgets", handle_budgets_command))
     application.add_handler(CommandHandler("ask", handle_ask_command))
+    application.add_handler(CommandHandler("plan", handle_plan_command))
+    application.add_handler(CommandHandler("myaccount", handle_myaccount_command))
     application.add_handler(CallbackQueryHandler(handle_category_callback, pattern=r"^cat:"))
     application.add_handler(CallbackQueryHandler(handle_audit_category_callback, pattern=r"^acat:"))
+    application.add_handler(CallbackQueryHandler(handle_pending_action_callback, pattern=r"^pa:"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))
     return application

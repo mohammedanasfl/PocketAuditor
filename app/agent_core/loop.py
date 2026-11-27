@@ -104,6 +104,11 @@ async def run_agent(
             logger.warning("run=%s: model call failed: %s", run_id, exc)
             status = "failed"
             break
+        except Exception:
+            # Any other SDK/network error: same outcome, never crash the caller.
+            logger.exception("run=%s: unexpected error calling the model", run_id)
+            status = "failed"
+            break
         input_tokens += turn.input_tokens
         output_tokens += turn.output_tokens
         steps.append(
@@ -133,7 +138,7 @@ async def run_agent(
                     run_id=run_id,
                     step_no=len(steps) + 1,
                     kind="tool",
-                    tool_name=call.name,
+                    tool_name=call.name[:60],  # fits the column even if the model invents a long name
                     args=_short_json(call.args),
                     result=_short_json(result),
                     verdict=verdict,
@@ -175,20 +180,21 @@ async def _run_tool_call(call: ToolCall, tools_by_name: dict[str, Tool], ctx: To
     except ValidationError as exc:
         return {"error": f"invalid arguments: {exc.errors()[:3]}"}, "deny"
 
-    if tool.kind == "write":
-        verdict = await policy.check(tool.name, args, ctx)
-        if verdict.decision == "deny":
-            return {"error": f"not allowed: {verdict.reason}"}, "deny"
-        if verdict.decision == "ask":
-            if tool.ask_instead is None:
-                return {"error": f"needs the user's approval: {verdict.reason}"}, "ask"
-            return await tool.ask_instead(ctx, args, verdict.reason), "ask"
-
     try:
+        if tool.kind == "write":
+            verdict = await policy.check(tool.name, args, ctx)
+            if verdict.decision == "deny":
+                return {"error": f"not allowed: {verdict.reason}"}, "deny"
+            if verdict.decision == "ask":
+                if tool.ask_instead is None:
+                    return {"error": f"needs the user's approval: {verdict.reason}"}, "ask"
+                return await tool.ask_instead(ctx, args, verdict.reason), "ask"
         return await tool.run(ctx, args), "allow"
     except Exception:
         logger.exception("tool %s failed", call.name)
+        # A failed write leaves the session unusable until rolled back. The
+        # rollback expires every loaded object, so reload the one we use.
         await ctx.session.rollback()
         if ctx.transaction is not None:
-            await ctx.session.refresh(ctx.transaction)  # rollback expired it; reload
+            await ctx.session.refresh(ctx.transaction)
         return {"error": "the tool failed — try another way or ask the user"}, "error"

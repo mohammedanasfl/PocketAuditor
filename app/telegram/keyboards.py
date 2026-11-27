@@ -15,6 +15,18 @@ def category_keyboard(run_id: UUID) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+def confirm_keyboard(action_id: UUID) -> InlineKeyboardMarkup:
+    """Yes/No buttons for a change the chat agent proposed (a PendingAction)."""
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("✅ Yes", callback_data=f"pa:{action_id}:yes"),
+                InlineKeyboardButton("❌ No", callback_data=f"pa:{action_id}:no"),
+            ]
+        ]
+    )
+
+
 def audit_category_keyboard(expense_id: UUID) -> InlineKeyboardMarkup:
     """Buttons for the monthly audit's "recategorize this anomaly" prompt.
     A distinct `acat:` prefix (vs. reconcile's `cat:`) so the two callback

@@ -9,13 +9,14 @@ from telegram import Bot, Update
 from telegram.ext import ContextTypes
 
 from app.agent import PendingQuestion
+from app.agent_core.actions import resolve_pending_action
 from app.audit import AuditQuestion
 from app.categories import CATEGORIES
 from app.db import SessionLocal
 from app.expenses import recategorize_expense, resolve_ask_user_answer
-from app.models import ReconciliationRun
+from app.models import PendingAction, ReconciliationRun
 from app.telegram.handlers._shared import get_user_by_chat, parse_uuid
-from app.telegram.keyboards import audit_category_keyboard, category_keyboard
+from app.telegram.keyboards import audit_category_keyboard, category_keyboard, confirm_keyboard
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +79,34 @@ async def handle_category_callback(update: Update, context: ContextTypes.DEFAULT
         return
 
     await query.edit_message_text(f"Logged as {category}.")
+
+
+async def send_confirmation(bot: Bot, chat_id: int, action: PendingAction) -> None:
+    """Send one proposed change with Yes/No buttons."""
+    await bot.send_message(chat_id=chat_id, text=action.question, reply_markup=confirm_keyboard(action.id))
+
+
+async def handle_pending_action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Yes/No answer to a change the chat agent proposed (pa:<id>:yes|no)."""
+    query = update.callback_query
+    if query is None or query.data is None:
+        return
+    await query.answer()
+
+    parts = query.data.split(":")
+    if len(parts) != 3 or parts[2] not in ("yes", "no"):
+        logger.warning("malformed pending-action callback_data: %r", query.data)
+        return
+    action_id = parse_uuid(parts[1])
+    if action_id is None:
+        return
+
+    async with SessionLocal() as session:
+        user = await get_user_by_chat(session, update.effective_chat.id)
+        if user is None:
+            return
+        _action, message = await resolve_pending_action(session, action_id, user_id=user.id, approved=parts[2] == "yes")
+    await query.edit_message_text(message)
 
 
 async def send_audit_question(bot: Bot, chat_id: int, question: AuditQuestion) -> None:

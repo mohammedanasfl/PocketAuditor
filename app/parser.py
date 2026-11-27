@@ -153,6 +153,15 @@ def _parse_direction(text: str) -> bool | None:
     return None
 
 
+def looks_like_bank_sms(text: str) -> bool:
+    """Cheap first check (no LLM) to route a Telegram text message: a bank
+    SMS has an amount AND says money moved (or will move / is an OTP).
+    Everything else is treated as a chat message for the agent."""
+    if _parse_amount(text) is None:
+        return False
+    return bool(_DEBIT_RE.search(text) or _CREDIT_RE.search(text) or is_not_a_transaction(text))
+
+
 def is_not_a_transaction(text: str) -> bool:
     """Messages that mention an amount but are never a completed transaction:
     reminders about money that will move later, and OTP messages (unless

@@ -331,7 +331,7 @@ async def test_gemini_tool_calls_are_parsed_and_results_sent_back(monkeypatch):
         sent.append(kwargs)
         return SimpleNamespace(
             candidates=[SimpleNamespace(content=model_content)],
-            usage_metadata=SimpleNamespace(prompt_token_count=11, candidates_token_count=4),
+            usage_metadata=SimpleNamespace(prompt_token_count=11, candidates_token_count=4, thoughts_token_count=2),
         )
 
     monkeypatch.setattr(provider._client.aio.models, "generate_content", fake_generate)
@@ -340,7 +340,7 @@ async def test_gemini_tool_calls_are_parsed_and_results_sent_back(monkeypatch):
     turn = await provider.chat_with_tools("sys", [ChatMessage(role="user", text="go")], tools)
     assert [c.name for c in turn.tool_calls] == ["recall_merchant"]
     assert turn.tool_calls[0].id == "g1"
-    assert (turn.input_tokens, turn.output_tokens) == (11, 4)
+    assert (turn.input_tokens, turn.output_tokens) == (11, 6)  # thinking tokens count as output
 
     history = [
         ChatMessage(role="user", text="go"),
@@ -381,3 +381,91 @@ async def test_claude_tool_calls_are_parsed_and_results_sent_back(monkeypatch):
     assert messages[1]["content"][0]["type"] == "tool_use"
     assert messages[2]["content"][0]["tool_use_id"] == "t1"
     assert sent[0]["tools"][0]["input_schema"] == {"type": "object", "properties": {}}
+
+
+# --- fixes from the Phase 2 review --------------------------------------------
+
+
+async def test_a_tool_that_crashes_does_not_stop_the_other_transactions(db_session, monkeypatch):
+    import app.agent_core.tools as tools_module
+
+    user, _ = await _user_and_txn(db_session, merchant="FIRST")
+    db_session.add(
+        Transaction(user_id=user.id, raw_text="2", amount=Decimal("5"), merchant="SECOND", txn_date=date(2026, 11, 12))
+    )
+    await db_session.commit()
+
+    real_act = tools_module.act_on_decision
+    crashed = []
+
+    async def act_that_crashes_once(session, user_id, txn, decision):
+        if not crashed:
+            crashed.append(True)
+            raise RuntimeError("database hiccup")
+        return await real_act(session, user_id, txn, decision)
+
+    monkeypatch.setattr(tools_module, "act_on_decision", act_that_crashes_once)
+    log_food = calls(("log_as_new_expense", {"category": "Food", "confidence": 0.95, "reason": "x"}))
+    provider = ScriptedChatProvider([log_food, answer("failed"), log_food, answer("ok")])
+
+    summary = await reconcile_with_agent(db_session, provider, user.id)
+
+    # first: the tool crashed, the agent gave up, so the user is asked;
+    # second: logged normally.
+    assert summary.auto_logged == 1
+    assert summary.asked_user + summary.errors == 1
+
+
+async def test_unexpected_model_exception_is_a_failed_run_not_a_crash(db_session):
+    user, txn = await _user_and_txn(db_session)
+    provider = ScriptedChatProvider([ValueError("unexpected SDK error")])
+
+    summary = await reconcile_with_agent(db_session, provider, user.id)
+
+    assert summary.errors == 1
+    run = (await db_session.execute(select(AgentRun))).scalar_one()
+    assert run.status == "failed"
+
+
+async def test_caption_savings_can_be_logged_as_savings(db_session):
+    user, txn = await _user_and_txn(db_session)
+    txn.category_hint = "Savings"
+    await db_session.commit()
+    provider = ScriptedChatProvider(
+        [calls(("log_as_new_expense", {"category": "Savings", "confidence": 0.95, "reason": "captioned"}))]
+    )
+    summary = await reconcile_with_agent(db_session, provider, user.id)
+    assert summary.auto_logged == 1
+
+
+async def test_remembered_merchant_double_charge_is_asked_without_the_model(db_session):
+    user, _ = await _user_and_txn(db_session, merchant="SWIGGY")
+    db_session.add(MerchantCategory(user_id=user.id, merchant="swiggy", category="Food"))
+    earlier = Transaction(
+        user_id=user.id,
+        raw_text="earlier",
+        amount=Decimal("380.00"),
+        merchant="SWIGGY",
+        txn_date=date(2026, 11, 10),
+        status="processed",
+    )
+    db_session.add(earlier)
+    await db_session.flush()
+    db_session.add(
+        Expense(
+            user_id=user.id,
+            amount=Decimal("380.00"),
+            category="Food",
+            merchant="SWIGGY",
+            txn_date=date(2026, 11, 10),
+            linked_transaction_id=earlier.id,  # already linked: not a match candidate
+            created_via="auto_log",
+        )
+    )
+    await db_session.commit()
+    provider = ScriptedChatProvider([])
+
+    summary = await reconcile_with_agent(db_session, provider, user.id)
+
+    assert summary.asked_user == 1
+    assert provider.calls == 0

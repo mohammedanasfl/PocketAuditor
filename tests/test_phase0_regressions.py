@@ -127,7 +127,7 @@ def test_allowlist_is_closed_by_default_and_opens_only_for_listed_chats():
 
 
 def test_savings_rate_is_capped_so_it_fits_the_database_column():
-    incomes = [SimpleNamespace(amount=Decimal("1.00"))]
+    incomes = [SimpleNamespace(amount=Decimal("1.00"), kind="other")]
     expenses = [
         SimpleNamespace(
             id=uuid4(), amount=Decimal("50000.00"), category="Food", merchant="X", txn_date=date(2026, 10, 3)
