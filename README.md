@@ -174,178 +174,18 @@ uvicorn doesn't read `.env` on its own, so this is what keeps the two in sync.
 Note: port 7000 itself is taken on macOS by AirPlay Receiver (ControlCenter),
 which is why 7001 is the default here instead.
 
-### Production-style (webhook)
+### Production (free): Render + Neon + GitHub Actions
 
-Render's free tier sleeps on idle and wakes on incoming HTTP — a long-poller
-would fight the web service for the connection and get killed on sleep, so
-production runs in webhook mode instead (`RUN_MODE=webhook`, the default).
-Once deployed, point Telegram at your public URL:
+Step-by-step guide: [`docs/DEPLOY_RENDER.md`](docs/DEPLOY_RENDER.md).
 
-```bash
-curl "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook" \
-  -d "url=https://<your-app>.onrender.com/telegram/webhook" \
-  -d "secret_token=<TELEGRAM_WEBHOOK_SECRET>"
-```
-
-Set the same `TELEGRAM_WEBHOOK_SECRET` value in `.env` — the webhook route
-checks it against the `X-Telegram-Bot-Api-Secret-Token` header Telegram sends
-back, rejecting anything else with 401. This check fails *closed*: if
-`TELEGRAM_WEBHOOK_SECRET` isn't set, the route rejects every request,
-including real Telegram updates, rather than accepting unauthenticated ones.
-
-For local webhook testing without deploying, tunnel with `ngrok http "$PORT"`
-(matching whatever `PORT` you set in `.env`) and `setWebhook` against the
-ngrok URL instead.
-
-### Weekly cron (GitHub Actions)
-
-`/reconcile` and `/check-budgets` both require an `X-Cron-Secret` header
-matching `CRON_SECRET` in `.env` — like the webhook secret, this fails
-*closed*: leaving `CRON_SECRET` unset rejects every caller with 401 rather
-than letting anyone who finds `APP_URL` trigger an LLM run for every user in
-the database. Add `CRON_SECRET` as a repo secret alongside `APP_URL`.
-
-```yaml
-# .github/workflows/reconcile.yml
-name: Weekly reconcile
-on:
-  schedule:
-    - cron: "0 3 * * 1"   # Monday 03:00 UTC
-  workflow_dispatch: {}
-jobs:
-  reconcile:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Trigger reconciliation
-        run: |
-          curl -X POST "${{ secrets.APP_URL }}/reconcile" \
-            -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" -f
-```
-
-`POST /reconcile` returns `202` immediately (it schedules the actual loop as
-a background task) — this endpoint has no Telegram chat context, so unlike
-the `/reconcile` **command**, it loops over every known user in the DB, not
-just one chat. Each user's summary is pushed to their own chat when their
-loop finishes.
-
-### Daily cron for budget alerts (GitHub Actions)
-
-Budget alerts are deliberately checked **daily**, not weekly like
-reconciliation — an alert at "80% used, 4 days left" is only useful if it
-arrives with enough of the month left to act on it. A weekly check could mean
-you're already over budget for up to 6 days before hearing about it.
-
-```yaml
-# .github/workflows/check-budgets.yml
-name: Daily budget check
-on:
-  schedule:
-    - cron: "0 3 * * *"   # every day, 03:00 UTC
-  workflow_dispatch: {}
-jobs:
-  check-budgets:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Trigger budget check
-        run: |
-          curl -X POST "${{ secrets.APP_URL }}/check-budgets" \
-            -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" -f
-```
-
-Same `202`-and-background-task shape as `/reconcile`: it loops over every
-user, and `check_budget_alerts` itself guarantees at most one alert per
-category per calendar month (via `budget_alerts_sent`), so running this daily
-doesn't mean daily *nagging* — just a daily *check*.
-
-### Monthly cron for the salary audit (GitHub Actions)
-
-Runs on the 1st of each month and audits the **previous completed** month, so
-the whole month's income and spending is in before it's judged.
-
-```yaml
-# .github/workflows/run-audit.yml
-name: Monthly salary audit
-on:
-  schedule:
-    - cron: "0 3 1 * *"   # 1st of the month, 03:00 UTC
-  workflow_dispatch: {}
-jobs:
-  run-audit:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Trigger monthly audit
-        run: |
-          curl -X POST "${{ secrets.APP_URL }}/run-audit" \
-            -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" -f
-```
-
-Same `202`-and-background-task shape as `/reconcile`. `run_monthly_audit` is
-idempotent per month (the `(user_id, period_month)` row in `audit_runs` is
-both the trail and the once-per-month guard), so a re-run — or the on-demand
-`/audit` command — never double-audits.
-
-### Daily cron for mid-month salary alerts (GitHub Actions)
-
-Proactive within-the-month warnings (salary late, spending pace too high) are
-checked **daily**, same reasoning as budget alerts — a "salary hasn't arrived"
-or "you're on track to overspend" heads-up is only useful while there's still
-month left to act on it.
-
-```yaml
-# .github/workflows/check-salary-alerts.yml
-name: Daily salary alerts
-on:
-  schedule:
-    - cron: "0 3 * * *"   # every day, 03:00 UTC
-  workflow_dispatch: {}
-jobs:
-  check-salary-alerts:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Trigger salary-alert check
-        run: |
-          curl -X POST "${{ secrets.APP_URL }}/check-salary-alerts" \
-            -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" -f
-```
-
-`check_midmonth_alerts` dedups via `audit_alerts_sent` (at most one of each
-alert type per calendar month), so daily checking doesn't mean daily nagging.
-Both endpoints are gated by the same `CRON_SECRET` as `/reconcile` and
-`/check-budgets`.
-
-### Weekly cron for the spend digest (GitHub Actions)
-
-```yaml
-# .github/workflows/weekly-digest.yml
-name: Weekly digest
-on:
-  schedule:
-    - cron: "0 3 * * 1"   # Monday 03:00 UTC
-  workflow_dispatch: {}
-jobs:
-  weekly-digest:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Trigger weekly digest
-        run: |
-          curl -X POST "${{ secrets.APP_URL }}/send-weekly-digest" \
-            -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" -f
-```
-
-Same `202`-and-background-task shape, gated by the same `CRON_SECRET`. Unlike
-the budget/salary alerts, there's no dedup table here — a weekly cron running
-once a week has no "checked more often than the natural period" problem to
-solve, so a duplicate send is just a harmless repeated read-only message, the
-same reasoning that already applies to `/reconcile`.
-
-### Keep-alive ping (Render + Neon free tier)
-
-`GET /health` returns `200` without touching the database, so a keep-alive
-ping (e.g. from [cron-job.org](https://cron-job.org) or the same GitHub
-Actions workflow on a shorter schedule) can hit it without waiting on a
-possibly-suspended Neon compute to wake up.
-
----
+- `render.yaml` deploys the bot on Render's free plan in **webhook mode**; the
+  bot registers its own webhook on startup from `RENDER_EXTERNAL_URL` (or
+  `PUBLIC_URL` elsewhere) and `TELEGRAM_WEBHOOK_SECRET`.
+- `.github/workflows/scheduled-jobs.yml` calls the cron endpoints
+  (`/check-budgets`, `/check-salary-alerts`, `/reconcile`,
+  `/send-weekly-digest`, `/run-audit`, each gated by `X-Cron-Secret`) and
+  pings `/health` every 10 minutes so the free service stays awake. It needs
+  the repository secrets `APP_URL` and `CRON_SECRET`.
 
 ## Choosing an LLM provider
 

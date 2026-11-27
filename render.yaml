@@ -1,0 +1,47 @@
+# Render Blueprint — deploys the bot on Render's free plan (no credit card).
+# Render dashboard → New → Blueprint → pick this repo. See docs/DEPLOY_RENDER.md.
+#
+# The free plan sleeps after 15 minutes without traffic, so the bot runs in
+# WEBHOOK mode: a Telegram message wakes it up. It registers its own webhook
+# on startup (app/main.py:register_webhook) using RENDER_EXTERNAL_URL, which
+# Render sets automatically.
+services:
+  - type: web
+    name: pocketauditor
+    runtime: python
+    plan: free
+    region: singapore # closest Render region to India
+    branch: main
+    autoDeploy: true
+    buildCommand: pip install -r requirements.txt
+    # Applies any new database migration on every start, then serves.
+    startCommand: alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.11"
+      - key: RUN_MODE
+        value: webhook
+      - key: LLM_PROVIDER
+        value: gemini
+      - key: LLM_MODEL
+        value: gemini-3.5-flash-lite
+      - key: TIMEZONE
+        value: Asia/Kolkata
+      - key: RECONCILE_ENGINE
+        value: agent
+      # Random value for the scheduled jobs (copy it into the GitHub secret
+      # CRON_SECRET afterwards).
+      - key: CRON_SECRET
+        generateValue: true
+      # You fill these in when Render asks (they are never stored in git):
+      - key: DATABASE_URL # Neon: postgresql+asyncpg://...?ssl=require
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_WEBHOOK_SECRET # letters, digits, - and _ only (Telegram's rule)
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: ALLOWED_CHAT_IDS # your Telegram chat id
+        sync: false
