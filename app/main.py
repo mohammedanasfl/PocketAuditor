@@ -11,6 +11,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from telegram.ext import Application
 
 from app.config import settings
 from app.logging_config import configure_logging
@@ -19,6 +20,21 @@ from app.telegram.bot import build_application, set_bot_commands
 
 configure_logging()  # must run before anything below logs — see app/logging_config.py
 logger = logging.getLogger(__name__)
+
+
+async def register_webhook(application: Application) -> None:
+    """Webhook mode: tell Telegram where to send messages, so a fresh deploy
+    works without any manual setWebhook call. Needs PUBLIC_URL (set
+    automatically on Render) and TELEGRAM_WEBHOOK_SECRET."""
+    if not settings.public_url or not settings.telegram_webhook_secret:
+        logger.warning(
+            "Webhook mode, but PUBLIC_URL or TELEGRAM_WEBHOOK_SECRET is not set — not registering the webhook. "
+            "Set both, or call setWebhook yourself against <your-public-url>/telegram/webhook."
+        )
+        return
+    url = settings.public_url.rstrip("/") + "/telegram/webhook"
+    await application.bot.set_webhook(url=url, secret_token=settings.telegram_webhook_secret)
+    logger.info("Telegram bot running in webhook mode — webhook registered at %s", url)
 
 
 @asynccontextmanager
@@ -35,9 +51,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await application.updater.start_polling()
         logger.info("Telegram bot running in polling mode — send it a message.")
     else:
-        logger.info(
-            "Telegram bot running in webhook mode — call setWebhook against POST <your-public-url>/telegram/webhook."
-        )
+        await register_webhook(application)
 
     yield
 

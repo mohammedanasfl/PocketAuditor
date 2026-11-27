@@ -1,0 +1,67 @@
+name: Scheduled jobs
+
+# Calls the bot's cron endpoints on Render, and pings it so the free plan
+# doesn't fall asleep (Render sleeps a free service after 15 minutes without
+# traffic; one always-awake service fits in the free 750 hours a month).
+#
+# Needs two repository secrets (Settings → Secrets and variables → Actions):
+#   APP_URL      e.g. https://pocketauditor.onrender.com
+#   CRON_SECRET  the same value as CRON_SECRET on Render
+# Times are UTC: 03:00 UTC = 08:30 in India.
+on:
+  schedule:
+    - cron: "*/10 * * * *" # keep-alive ping
+    - cron: "0 3 * * *" # daily: budget alerts + salary/money alerts
+    - cron: "0 4 * * 1" # Mondays: reconcile anything pending + weekly digest
+    - cron: "0 5 1 * *" # 1st of the month: monthly audit
+  workflow_dispatch:
+    inputs:
+      job:
+        description: Which job to run now
+        type: choice
+        options: [ping, check-budgets, check-salary-alerts, reconcile, send-weekly-digest, run-audit]
+        default: ping
+
+jobs:
+  call:
+    runs-on: ubuntu-latest
+    env:
+      APP_URL: ${{ secrets.APP_URL }}
+      CRON_SECRET: ${{ secrets.CRON_SECRET }}
+    steps:
+      - name: Pick the endpoints for this run
+        id: pick
+        run: |
+          case "${{ github.event.schedule }}" in
+            "*/10 * * * *") endpoints="" ;;
+            "0 3 * * *")    endpoints="check-budgets check-salary-alerts" ;;
+            "0 4 * * 1")    endpoints="reconcile send-weekly-digest" ;;
+            "0 5 1 * *")    endpoints="run-audit" ;;
+            *)              endpoints="${{ inputs.job }}" ;;  # manual run
+          esac
+          if [ "$endpoints" = "ping" ]; then endpoints=""; fi
+          echo "endpoints=$endpoints" >> "$GITHUB_OUTPUT"
+
+      - name: Stop here if the secrets aren't set yet
+        id: configured
+        run: |
+          if [ -z "$APP_URL" ] || [ -z "$CRON_SECRET" ]; then
+            echo "::notice::APP_URL / CRON_SECRET secrets not set — nothing to call yet."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Wake the app (can take ~1 minute on the free plan)
+        if: steps.configured.outputs.ok == 'true'
+        run: curl --fail --silent --show-error --retry 6 --retry-delay 15 --retry-all-errors --max-time 90 "$APP_URL/health"
+
+      - name: Call the jobs
+        if: steps.configured.outputs.ok == 'true' && steps.pick.outputs.endpoints != ''
+        run: |
+          for endpoint in ${{ steps.pick.outputs.endpoints }}; do
+            echo "POST /$endpoint"
+            curl --fail --silent --show-error --retry 3 --retry-delay 10 --max-time 60 \
+              -X POST -H "X-Cron-Secret: $CRON_SECRET" "$APP_URL/$endpoint"
+            echo
+          done

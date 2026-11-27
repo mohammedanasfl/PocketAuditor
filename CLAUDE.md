@@ -67,6 +67,13 @@ Postgres 16 service, and a Docker build. Live Gemini evals are a separate
 manual workflow (`live-evals.yml`) so they never show up as skipped checks
 on a PR. Keep new checks fast and offline.
 
+Production runs on Render's free plan (`render.yaml`, guide in
+`docs/DEPLOY_RENDER.md`) in webhook mode: `app/main.py:register_webhook`
+calls `setWebhook` on startup from `settings.public_url` (`PUBLIC_URL`, or
+Render's automatic `RENDER_EXTERNAL_URL`). `.github/workflows/scheduled-jobs.yml`
+calls the cron endpoints and pings `/health` every 10 minutes (free Render
+sleeps after 15 idle minutes).
+
 ## Code standards
 
 **Keep code beginner-simple** (the owner's standing rule — see

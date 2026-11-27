@@ -6,7 +6,7 @@ from __future__ import annotations
 from typing import Literal
 from zoneinfo import ZoneInfo
 
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -81,6 +81,11 @@ class Settings(BaseSettings):
     # --- Runtime ------------------------------------------------------
     run_mode: Literal["webhook", "polling"] = "webhook"
     port: int = 7001
+    # The app's public https address, e.g. https://pocketauditor.onrender.com.
+    # In webhook mode the bot registers <public_url>/telegram/webhook with
+    # Telegram on startup. Render sets RENDER_EXTERNAL_URL automatically, so
+    # on Render nothing needs to be configured.
+    public_url: str | None = Field(default=None, validation_alias=AliasChoices("PUBLIC_URL", "RENDER_EXTERNAL_URL"))
 
     @field_validator("timezone")
     @classmethod
