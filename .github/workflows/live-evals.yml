@@ -1,0 +1,46 @@
+name: Live evals (Gemini)
+
+# Manual only (Actions → Live evals (Gemini) → Run workflow). Calls the real
+# Gemini API using the GEMINI_API_KEY repository secret, so it costs API
+# calls — that's why it is not part of CI on every commit.
+on:
+  workflow_dispatch:
+
+env:
+  DATABASE_URL: postgresql+asyncpg://ci:ci@localhost:5432/ci
+  TELEGRAM_BOT_TOKEN: "000000:ci-placeholder-token"
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  live-evals:
+    name: Live evals against Gemini (manual only)
+    runs-on: ubuntu-latest
+    env:
+      LLM_PROVIDER: gemini
+      LLM_MODEL: gemini-3.5-flash-lite
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - name: Check the API key secret is set
+        run: |
+          if [ -z "$GEMINI_API_KEY" ]; then
+            echo "Add a GEMINI_API_KEY repository secret first (Settings > Secrets and variables > Actions)."
+            exit 1
+          fi
+      - name: Parser eval (Gemini)
+        run: python -m evals.run --suite parser --provider gemini --model "$LLM_MODEL" --fail-on-unsafe
+      - name: Reconcile eval — agent engine (Gemini)
+        run: python -m evals.run --suite reconcile --provider gemini --model "$LLM_MODEL" --engine agent --fail-on-unsafe
+      - name: Reconcile eval — pipeline engine (Gemini)
+        run: python -m evals.run --suite reconcile --provider gemini --model "$LLM_MODEL" --engine pipeline --fail-on-unsafe
+      - name: Upload eval reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-reports-gemini
+          path: evals/results/

@@ -631,8 +631,8 @@ pytest
 
 ### CI (`.github/workflows/ci.yml`)
 
-Runs on **every commit on every branch**, on every pull request, and on
-demand. No secrets needed except for the optional live evals.
+Runs on **every commit on every branch** (a pull request shows its latest
+commit's checks) and on demand. No secrets needed.
 
 | Job | What it checks |
 |---|---|
@@ -641,7 +641,7 @@ demand. No secrets needed except for the optional live evals.
 | Offline evals | parser + both reconcile engines with no LLM; fails if any scenario writes wrong data |
 | Postgres | real Postgres 16: `alembic upgrade head`, full downgrade + upgrade, `alembic check` (models match migrations), and `scripts/postgres_smoke.py` (savings month, agent, approvals, audit) |
 | Docker | the image builds and the app imports inside it |
-| Live evals (manual) | Actions → CI → Run workflow → tick "live evals": runs the evals against Gemini using the `GEMINI_API_KEY` repository secret and uploads the reports |
+| Live evals (separate, manual) | `.github/workflows/live-evals.yml` — Actions → "Live evals (Gemini)" → Run workflow: runs the evals against Gemini using the `GEMINI_API_KEY` repository secret and uploads the reports |
 
 CI doesn't deploy anything — deployment stays separate.
 

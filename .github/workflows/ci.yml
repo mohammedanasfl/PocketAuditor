@@ -1,15 +1,12 @@
 name: CI
 
-# Every commit on every branch, every pull request, and on demand.
+# Every commit on every branch (a pull request shows the checks of its
+# branch's latest commit), and on demand. Not also on `pull_request`: that
+# would run everything twice for the same commit.
+# The live Gemini evals are a separate, manual workflow: live-evals.yml.
 on:
   push:
-  pull_request:
   workflow_dispatch:
-    inputs:
-      live_evals:
-        description: "Also run the evals against real Gemini (uses the GEMINI_API_KEY secret, costs API calls)"
-        type: boolean
-        default: false
 
 # A newer push to the same branch cancels the older, still-running CI.
 concurrency:
@@ -131,38 +128,3 @@ jobs:
           -e DATABASE_URL="$DATABASE_URL"
           -e TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN"
           pocketauditor:ci python -c "import app.main; print('app imports OK')"
-
-  live-evals:
-    name: Live evals against Gemini (manual only)
-    if: github.event_name == 'workflow_dispatch' && inputs.live_evals
-    needs: [test, evals]
-    runs-on: ubuntu-latest
-    env:
-      LLM_PROVIDER: gemini
-      LLM_MODEL: gemini-3.5-flash-lite
-      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-      - run: pip install -r requirements-dev.txt
-      - name: Check the API key secret is set
-        run: |
-          if [ -z "$GEMINI_API_KEY" ]; then
-            echo "Add a GEMINI_API_KEY repository secret first (Settings > Secrets and variables > Actions)."
-            exit 1
-          fi
-      - name: Parser eval (Gemini)
-        run: python -m evals.run --suite parser --provider gemini --model "$LLM_MODEL" --fail-on-unsafe
-      - name: Reconcile eval — agent engine (Gemini)
-        run: python -m evals.run --suite reconcile --provider gemini --model "$LLM_MODEL" --engine agent --fail-on-unsafe
-      - name: Reconcile eval — pipeline engine (Gemini)
-        run: python -m evals.run --suite reconcile --provider gemini --model "$LLM_MODEL" --engine pipeline --fail-on-unsafe
-      - name: Upload eval reports
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: eval-reports-gemini
-          path: evals/results/

@@ -63,8 +63,9 @@ python -m scripts.postgres_smoke
 CI (`.github/workflows/ci.yml`) runs on every push to any branch: lint +
 mypy, pytest with an 85% coverage floor, offline evals with
 `--fail-on-unsafe`, migrations + `alembic check` + the smoke test on a
-Postgres 16 service, and a Docker build. Live Gemini evals run only on a
-manual dispatch. Keep new checks fast and offline.
+Postgres 16 service, and a Docker build. Live Gemini evals are a separate
+manual workflow (`live-evals.yml`) so they never show up as skipped checks
+on a PR. Keep new checks fast and offline.
 
 ## Code standards
 
