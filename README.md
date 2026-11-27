@@ -629,13 +629,21 @@ and salary alerts.
 pytest
 ```
 
-Runs automatically on every push/PR to `main` via
-`.github/workflows/ci.yml` — no secrets required, since the whole suite is
-offline (`DATABASE_URL`/`TELEGRAM_BOT_TOKEN` in that workflow are just
-placeholders to satisfy `Settings()`'s required fields at import time; the
-tests themselves never connect to Postgres or Telegram). This is CI only —
-Render keeps deploying on every push to `main` exactly as it already did;
-this workflow doesn't gate that.
+### CI (`.github/workflows/ci.yml`)
+
+Runs on **every commit on every branch**, on every pull request, and on
+demand. No secrets needed except for the optional live evals.
+
+| Job | What it checks |
+|---|---|
+| Lint + types | `ruff check`, `ruff format --check`, `mypy app` |
+| Tests | `pytest` with coverage — fails below 85% (currently ~88%) |
+| Offline evals | parser + both reconcile engines with no LLM; fails if any scenario writes wrong data |
+| Postgres | real Postgres 16: `alembic upgrade head`, full downgrade + upgrade, `alembic check` (models match migrations), and `scripts/postgres_smoke.py` (savings month, agent, approvals, audit) |
+| Docker | the image builds and the app imports inside it |
+| Live evals (manual) | Actions → CI → Run workflow → tick "live evals": runs the evals against Gemini using the `GEMINI_API_KEY` repository secret and uploads the reports |
+
+CI doesn't deploy anything — deployment stays separate.
 
 All tests are offline (mocked HTTP/API calls, aiosqlite for DB tests) — no
 live Gemini/Claude, Telegram or Neon connection required. Covers:

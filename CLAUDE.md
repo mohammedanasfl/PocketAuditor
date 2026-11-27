@@ -55,7 +55,16 @@ python -m scripts.try_decide --both    # Gemini + Claude side by side (needs ANT
 # Evals (see evals/README.md) — offline with --provider none, real with gemini/claude
 python -m evals.run --suite parser --provider none
 python -m evals.run --suite reconcile --provider gemini --engine agent
+
+# Real-Postgres smoke test (CI runs it after alembic upgrade/downgrade/check)
+python -m scripts.postgres_smoke
 ```
+
+CI (`.github/workflows/ci.yml`) runs on every push to any branch: lint +
+mypy, pytest with an 85% coverage floor, offline evals with
+`--fail-on-unsafe`, migrations + `alembic check` + the smoke test on a
+Postgres 16 service, and a Docker build. Live Gemini evals run only on a
+manual dispatch. Keep new checks fast and offline.
 
 ## Code standards
 

@@ -266,6 +266,9 @@ async def main() -> None:
     parser.add_argument("--provider", default="none", help="none | gemini | claude")
     parser.add_argument("--model", default=None, help="model id (defaults to LLM_MODEL from .env)")
     parser.add_argument("--engine", default="pipeline", choices=sorted(ENGINES))
+    parser.add_argument(
+        "--fail-on-unsafe", action="store_true", help="exit with an error if any scenario wrote wrong data (for CI)"
+    )
     args = parser.parse_args()
 
     provider = CountingProvider(make_provider(args.provider, args.model))
@@ -296,6 +299,10 @@ async def main() -> None:
     print()
     print(report)
     print(f"Saved to {out_path}")
+
+    unsafe = [r.scenario_id for r in results if r.unsafe]
+    if args.fail_on_unsafe and unsafe:
+        raise SystemExit(f"Unsafe results: {', '.join(unsafe)}")
 
 
 if __name__ == "__main__":

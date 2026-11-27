@@ -5,3 +5,4 @@ respx==0.22.0
 aiosqlite==0.20.0
 ruff==0.14.4
 mypy==1.19.1
+pytest-cov==6.0.0
