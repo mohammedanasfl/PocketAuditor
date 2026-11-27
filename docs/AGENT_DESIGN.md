@@ -66,7 +66,7 @@ flowchart TB
 
     subgraph Core["Agent core"]
         AG["Agent loop<br/>plan → call tool → observe<br/>(max 8 steps)"]
-        LLM["LLMProvider.chat_with_tools()<br/>Gemini 3.5 Flash-Lite (default) · Claude · Ollama"]
+        LLM["LLMProvider.chat_with_tools()<br/>Gemini 3.5 Flash-Lite (dev + prod) · Claude (eval comparison only)"]
         REG["Tool registry<br/>Pydantic arg schemas"]
         POL{"Policy layer<br/>allow · ask · deny"}
     end
@@ -183,7 +183,7 @@ Rules (generalizing today's `_apply_guard` / `_apply_duplicate_guard`):
 | Tool calling | Native tool/function calling of each provider, behind `LLMProvider` | Reuses existing provider boundary | Prompted JSON "ReAct" parsing (brittle) |
 | Default agent model | **Gemini 3.5 Flash-Lite** (`LLM_MODEL=gemini-3.5-flash-lite`, stable GA id) | Low cost, fast, supports function calling and image input (receipts) | — |
 | Optional comparison model | Claude (Sonnet-class) | Stronger multi-step tool use; used in evals to show the cost/accuracy tradeoff | — |
-| Local dev | Ollama `qwen2.5` 7B (tool-capable) | Free, offline; evals show its gap honestly | — |
+| Local dev | **Same Gemini 3.5 Flash-Lite** (separate dev API key) | Dev behaves exactly like prod; one provider to learn and debug. Tests stay offline (fake provider), so no key is needed to run `pytest` | Ollama (removed in Phase 2 — fewer providers = simpler code) |
 | Database | Keep Postgres (Neon) + SQLAlchemy async + Alembic | One store for ledger, state, memory, traces | Redis, separate vector DB |
 | Fuzzy memory | `pg_trgm` | Built into Postgres, no new infra | pgvector (add only if evals need it) |
 | Tracing | Own `agent_runs`/`agent_steps` tables | Zero dependencies, queryable with SQL | Langfuse/LangSmith (can export later) |
@@ -197,7 +197,7 @@ Rules (generalizing today's `_apply_guard` / `_apply_duplicate_guard`):
 | Table | Purpose |
 |---|---|
 | `users.timezone` (new column) | Correct "today" / month boundaries |
-| `salary_profiles.savings_pct` (new column) | The user's savings rule, e.g. 80 = move 80% of salary to savings |
+| `salary_profiles.savings_target` (existing, optional) | An optional savings *goal* used only for feedback in reports — never required, since the amount saved changes every month |
 | `own_accounts` | The user's own account identifiers (last 4 digits / UPI id of the savings account) so transfers in both directions are recognized as self-transfers, not spend or income |
 | `incomes.kind` (new column) | `salary` / `savings_withdrawal` / `refund` / `other` — so money pulled back from savings is never counted as income |
 | `agent_runs` | One row per agent run: trigger, goal, status (`running/paused/done/failed`), tokens, cost, latency, prompt version |
@@ -210,12 +210,30 @@ Existing tables (`transactions`, `expenses`, `incomes`, `budgets`,
 `salary_profiles`, `merchant_categories`, …) stay. `reconciliation_runs` and
 `audit_runs` remain for history; new runs are traced in `agent_runs`.
 
-## 8. Example flow: the 80/20 salary rule
+## 8. Example flow: salary → savings → spending (amount saved varies)
 
-The user's habit: when salary arrives, move 80% to the savings account and
-live on the remaining 20%. If the 20% runs out, pull some money back from
-savings. Setup once: `/salary 50000 savings=80% payday=1` and
-`/myaccount savings 4321` (last 4 digits of the savings account).
+The user's habit: when salary arrives, move *some* of it to the savings
+account — the amount changes month to month (e.g. 80% one month, 60% the
+next, in one or several transfers). Live on what's left. If that runs out,
+pull some money back from savings.
+
+So the system **never assumes a fixed percentage**. It measures what the user
+actually moved, and works out the spending money from that. Setup once:
+`/myaccount savings 4321` (last 4 digits of the savings account). A savings
+goal is optional (`/salary 50000 goal=30000`) and only used for feedback.
+
+### The one formula everything uses
+
+```
+spending_money = salary + other_income
+               − moved_to_savings          (all transfers this month, any amount, any day)
+               + taken_back_from_savings   (all withdrawals this month)
+
+money_left     = spending_money − spent_so_far
+```
+
+It is recalculated in code every time a relevant SMS arrives, so it is
+always correct no matter how many transfers happen or in what order.
 
 ```mermaid
 sequenceDiagram
@@ -223,51 +241,72 @@ sequenceDiagram
     actor U as User
     participant B as Bot (ingestion)
     participant A as Agent
-    participant P as Policy
     participant D as Postgres
 
     U->>B: Forward "Rs.50,000 credited ... SALARY"
     B->>D: incomes(kind=salary, 50,000)
-    B->>A: event: salary_credited
-    A->>D: get_month_plan → spend budget = 20% × 50,000 = 10,000
-    A-->>U: "Salary received. Move Rs.40,000 to savings. Budget this month: Rs.10,000"
+    A-->>U: "Salary received ✅ Rs.50,000. Tell me when you move money to savings."
 
-    U->>B: Forward "Rs.40,000 debited ... to A/c XX4321"
-    B->>D: match own_accounts → expense(category=Savings) — not spend
-    A-->>U: "Rs.40,000 moved to savings ✅"
+    U->>B: Forward "Rs.35,000 debited ... to A/c XX4321"
+    B->>D: own account → expense(category=Savings) — not spend
+    A->>D: get_month_plan (code) → spending money = 50,000 − 35,000 = 15,000
+    A-->>U: "Rs.35,000 moved to savings (70% this month). Spending money: Rs.15,000"
 
-    loop Every day spending comes in
+    U->>B: (later) Forward "Rs.5,000 debited ... to A/c XX4321"
+    A->>D: get_month_plan → spending money = 10,000
+    A-->>U: "Another Rs.5,000 saved (total 40,000, 80%). Spending money now Rs.10,000"
+
+    loop Spending SMS through the month
         U->>B: Forward spend SMS
-        B->>A: event: new transaction
-        A->>P: log_expense(...)
-        P-->>A: allow (or ask if unsure)
-        A->>D: expense saved; budget_used recalculated in code
+        A->>D: log_expense (via policy) → money_left recalculated in code
     end
-    A-->>U: Alerts at 50% / 80% / 100% of Rs.10,000 (sent once each)
+    A-->>U: Alerts once each: half used · only 20% left · ran out<br/>+ pace alert: "at this rate you run out on the 22nd"
 
     U->>B: Forward "Rs.3,000 credited ... from A/c XX4321"
-    B->>D: match own_accounts → incomes(kind=savings_withdrawal) — NOT income
-    A-->>U: "Rs.3,000 taken back from savings. Real savings now Rs.37,000 (74%, target 80%)"
+    B->>D: own account → incomes(kind=savings_withdrawal) — NOT income
+    A->>D: get_month_plan → spending money = 13,000, saved = 37,000
+    A-->>U: "Rs.3,000 taken back from savings. Saved this month: Rs.37,000 (74%)"
 
     Note over A,D: 1st of next month — audit goal
     A->>D: get_month_snapshot (all numbers computed in code)
-    A-->>U: Report: salary 50,000 · spent 13,000 (budget 10,000)<br/>· saved 40,000 − 3,000 = 37,000 (74%) · tips to stay in budget
+    A-->>U: Report: salary 50,000 · saved 37,000 (74%) · spent 13,000<br/>· vs last month · vs goal (if set) · tips
 ```
 
-What is computed in code (never by the model):
+### Numbers computed in code (never by the model)
 
 | Number | Formula |
 |---|---|
-| Monthly spend budget | `salary_received × (100 − savings_pct) / 100` |
-| Amount to move to savings | `salary_received × savings_pct / 100` |
-| Budget used | sum of this month's expenses, excluding `Savings` category |
-| Taken back from savings | sum of `incomes` where `kind = savings_withdrawal` this month |
-| Real savings | moved to savings − taken back from savings |
-| Real savings % | real savings ÷ salary received × 100 |
+| Moved to savings | sum of this month's transfers to an own savings account |
+| Taken back from savings | sum of this month's credits from an own savings account (`incomes.kind = savings_withdrawal`) |
+| Saved this month | moved to savings − taken back |
+| Savings % (this month) | saved ÷ salary × 100 — reported, not enforced |
+| Spending money | salary + other income − moved to savings + taken back |
+| Spent so far | sum of this month's expenses, excluding `Savings` |
+| Money left | spending money − spent so far |
+| Run-out date (pace) | today + money left ÷ average daily spend so far |
 
-What the model does: picks the tools, writes the short messages and monthly
-tips, and asks the user when an SMS is unclear (e.g. a transfer to an
-account it doesn't recognize).
+### Alerts (each sent at most once per month, deduped like today's budget alerts)
+
+| Alert | When |
+|---|---|
+| Half used | spent ≥ 50% of spending money |
+| Running low | money left ≤ 20% of spending money |
+| Ran out | money left ≤ 0 — suggests how much to take from savings |
+| Fast pace | projected run-out date is before month-end (only after day 7) |
+
+If more money moves to savings later in the month, spending money shrinks and
+the alerts are simply re-checked against the new number.
+
+**Edge case — spending before saving:** if the user hasn't moved anything to
+savings yet, spending money = the whole salary. The bot says so plainly
+("nothing moved to savings yet") instead of guessing a percentage.
+
+### What the model does
+
+Picks the tools, writes the short messages and monthly tips (e.g. "you saved
+less than last month mainly because of Shopping"), and asks the user when an
+SMS is unclear — e.g. a transfer to an account it doesn't recognize
+("Is A/c XX9876 your own account?").
 
 ## 9. Evaluation plan
 
@@ -292,7 +331,7 @@ account it doesn't recognize).
 | 1. Eval baseline | Scenario format, runner, scorers, 50+ scenarios, baseline report of current pipeline | Baseline numbers committed |
 | 2. Agent core | `chat_with_tools` in 3 providers, tool registry, policy layer, loop, tracing tables | Reconcile goal runs through the agent; policy 100% unit-tested |
 | 3. HITL + chat | `pending_actions`, pause/resume, conversational mode replaces `/ask` | Multi-step chat scenarios pass |
-| 3b. Savings rule | `savings_pct`, `own_accounts`, `incomes.kind`, savings-withdrawal detection, 50/80/100% budget alerts (§8) | 80/20 scenarios pass in evals |
+| 3b. Savings flow | `own_accounts`, `incomes.kind`, savings transfer + withdrawal detection, `get_month_plan` (spending money / money left), the 4 alerts (§8) | Varying-savings scenarios pass in evals (different %, multiple transfers, withdrawals, spending before saving) |
 | 4. Proactive + memory | Cron goals (reconcile, audit, alerts) via agent; `pg_trgm` merchant memory | Eval report: agent vs. baseline, per provider |
 | 5. Polish | README rewritten around results, architecture diagram, demo GIF | Resume bullets backed by real numbers |
 
@@ -303,5 +342,5 @@ account it doesn't recognize).
 | Agent loops or wastes tokens | `max_steps`, per-run token budget, traced cost |
 | Model writes wrong data | Policy layer + HITL; evals track unsafe writes |
 | Prompt injection via SMS text | SMS content passed as data, policy enforces rules regardless of model output; injection scenarios in evals |
-| 7B local model too weak for tool use | Expected; evals quantify it; Gemini/Claude for real use |
+| Dev depends on internet + Gemini API key | Tests use a fake provider (offline); a separate dev key with its own quota |
 | Scope creep | Non-goals list above; each phase has an exit criterion |
