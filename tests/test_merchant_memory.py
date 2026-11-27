@@ -115,3 +115,19 @@ async def test_recall_gives_up_when_similar_merchants_disagree(db_session):
     await db_session.commit()
 
     assert await recall_merchant_category(db_session, user.id, "AMAZON PAY") is None
+
+
+async def test_similar_but_different_names_are_only_a_hint(db_session):
+    from app.merchant_memory import recall_merchant_category, remember_merchant_category, suggest_merchant_category
+    from app.models import User
+
+    user = User(telegram_chat_id=1)
+    db_session.add(user)
+    await db_session.commit()
+    await remember_merchant_category(db_session, user.id, "RAHUL", "Food")
+    await db_session.commit()
+
+    # "rahul sharma" may be a different person: never logged automatically...
+    assert await recall_merchant_category(db_session, user.id, "RAHUL SHARMA") is None
+    # ...but the agent gets it as a hint for its question.
+    assert await suggest_merchant_category(db_session, user.id, "RAHUL SHARMA") == "Food"

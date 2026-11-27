@@ -386,7 +386,6 @@ async def test_salary_paid_on_the_28th_counts_for_the_month_it_is_spent_in(db_se
     "sms",
     [
         "Rs 35,000.00 credited to A/c XX4321 on 01-11-26 from A/c XX1234 via IMPS",
-        "Rs.3,000.00 transferred from A/c XX4321 on 20-11-26 to A/c XX1234",
     ],
 )
 async def test_the_savings_banks_own_side_of_a_transfer_is_skipped(db_session, sms):
@@ -424,3 +423,77 @@ async def test_double_tap_on_yes_applies_the_change_once(db_session):
 
     assert first is not None and second is None
     assert (await db_session.execute(select(func.count()).select_from(Expense))).scalar_one() == 1
+
+
+# --- fixes from the final review ---------------------------------------------
+
+
+def test_payday_late_in_the_month_works_in_short_months():
+    from app.month_plan import plan_period
+
+    assert plan_period(date(2026, 2, 28), 31) == (date(2026, 2, 28), date(2026, 3, 30))
+    assert plan_period(date(2026, 4, 30), 31) == (date(2026, 4, 30), date(2026, 5, 30))
+    assert plan_period(date(2026, 2, 28), 29) == (date(2026, 2, 28), date(2026, 3, 28))
+    # every day of two years falls inside its own budget month, for every payday
+    for payday in range(1, 32):
+        day = date(2027, 1, 1)
+        while day.year <= 2028:
+            start, end = plan_period(day, payday)
+            assert start <= day <= end, (payday, day)
+            day = date.fromordinal(day.toordinal() + 1)
+
+
+def test_the_nearest_preposition_decides_the_direction():
+    assert account_direction("Rs 5000 credited to XX1234 from XX4321", "4321") == "from"
+
+
+async def test_paying_someone_else_from_savings_is_spending(db_session):
+    user = await _user(db_session)
+    db_session.add(OwnAccount(user_id=user.id, last4="4321", kind="savings"))
+    await db_session.commit()
+    result = await ingest_sms_transaction(
+        db_session, user, "IMPS Rs.5000 debited from A/c XX4321 on 12-11-26 to A/c XX9999 RAMESH", _NoLLM()
+    )
+    assert result.outcome == "transaction_created"
+
+
+async def test_savings_to_my_registered_main_account_is_skipped(db_session):
+    user = await _user(db_session)
+    db_session.add_all(
+        [
+            OwnAccount(user_id=user.id, last4="4321", kind="savings"),
+            OwnAccount(user_id=user.id, last4="1234", kind="main"),
+        ]
+    )
+    await db_session.commit()
+    result = await ingest_sms_transaction(
+        db_session, user, "Rs.3,000.00 transferred from A/c XX4321 on 20-11-26 to A/c XX1234", _NoLLM()
+    )
+    assert result.outcome == "savings_side_skipped"
+
+
+def test_more_routing_cases():
+    assert not looks_like_bank_sms("Salary credited 50000 in my account, plan my month")
+    assert looks_like_bank_sms("Hi, Rs.500.00 debited from A/c XX1234 on 12-11-26 to SWIGGY")
+    assert looks_like_bank_sms("We have received payment of Rs.5,000 towards your ICICI Bank Credit Card XX4321")
+
+
+async def test_an_approved_change_that_fails_can_be_tried_again(db_session, monkeypatch):
+    import app.agent_core.actions as actions_module
+
+    user = await _user(db_session)
+    provider = ScriptedChatProvider([calls(("set_budget", {"category": "Food", "monthly_limit": "100"})), answer("ok")])
+    reply = await answer_chat(db_session, provider, user.id, "food budget 100")
+    action_id = reply.confirmations[0].id
+    user_id = user.id  # plain copy: the failed attempt's rollback expires ORM objects
+
+    async def broken_apply(session, action):
+        raise RuntimeError("database hiccup")
+
+    monkeypatch.setattr(actions_module, "_apply", broken_apply)
+    first, message = await resolve_pending_action(db_session, action_id, user_id=user.id, approved=True)
+    assert first is None and "tap Yes again" in message
+
+    monkeypatch.undo()
+    second, message = await resolve_pending_action(db_session, action_id, user_id=user_id, approved=True)
+    assert second is not None and "budget set" in message

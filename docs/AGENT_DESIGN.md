@@ -355,7 +355,7 @@ version won (coding rule, §2):
 |---|---|---|
 | `users.timezone` column | One `TIMEZONE` setting (`app/timeutil.py`) | Single-user bot; one setting is enough and simpler |
 | HITL: pause the agent run and resume it after the tap | The approved `PendingAction` is executed by plain code (`agent_core/actions.py`); the run is already finished | No stored model state to resume; the model is not needed after the user decided |
-| Fuzzy merchant memory with `pg_trgm` | `difflib` + word overlap in Python (`merchant_memory.py`), only when all similar merchants agree | No Postgres extension; works the same on SQLite tests |
+| Fuzzy merchant memory with `pg_trgm` | Same-words match logs automatically; a looser `difflib`/word-overlap match is only a hint to the agent (`merchant_memory.py`) | No Postgres extension; similar names can be different people, so fuzzy never auto-logs |
 | Cron goals (audit, alerts) through the agent | Audit and alerts stay deterministic; the LLM writes only the audit prose | Numbers must be exact; reconcile cron does use the agent |
 | Fixed calendar month | Budget month starts on payday (`month_plan.plan_period`) | Salary paid on the 28th–31st is spent in the next month |
 | — | Savings bank's own SMS for a transfer is skipped (`savings.is_savings_side_of_a_transfer`) | Otherwise forwarding both sides counts the move twice |

@@ -47,7 +47,15 @@ async def resolve_pending_action(
     await session.refresh(action)
     if not approved:
         return action, "OK, I didn't change anything."
-    message = await _apply(session, action)
+    try:
+        message = await _apply(session, action)
+    except Exception:
+        # Nothing changed: put the action back so the user can tap Yes again.
+        logger.exception("pending action=%s failed to apply", action_id)
+        await session.rollback()
+        await session.execute(update(PendingAction).where(PendingAction.id == action_id).values(status="waiting"))
+        await session.commit()
+        return None, "Sorry, that didn't work. Please tap Yes again."
     logger.info("pending action=%s (%s) applied for user=%s", action.id, action.tool_name, user_id)
     return action, message
 

@@ -290,7 +290,12 @@ back` and `money_left`, and the deduped money alerts (`half_used`,
 (`plan_period`), not the 1st. The savings bank's *own* SMS for a move between
 your accounts (money arriving in savings, or leaving it for another account)
 is skipped (`is_savings_side_of_a_transfer`) — the move is counted from the
-main account's SMS, and counting both sides would double it.
+main account's SMS, and counting both sides would double it. A debit from
+savings is only skipped when it goes to the user's registered *main* account
+(`/myaccount main 1234`); paying anyone else from savings is real spending.
+Merchant memory: only an exact / same-words match (`recall_merchant_category`)
+may log without asking; a looser fuzzy match (`suggest_merchant_category`) is
+passed to the agent as a hint only — similar names can be different people.
 
 Text messages are routed by plain code before any LLM call:
 `parser.looks_like_bank_sms` needs an account/UPI/card marker plus an amount

@@ -160,10 +160,11 @@ _BANK_MARKER_RE = re.compile(
 )
 # "debited by 20.0" — SBI writes amounts with no Rs/INR in front.
 _BARE_AMOUNT_RE = re.compile(r"\b(?:debited|credited)\b\W+(?:by|for|with)?\s*\d", re.IGNORECASE)
+_ACCOUNT_MASK_RE = re.compile(r"[xX*]+\d{3,}")
 # How a person (not a bank) starts a message: a question, or "I ..." / "my ...".
 _PERSON_START_RE = re.compile(
     r"^\s*(?:how|what|why|when|where|which|who|did|does|do|is|are|was|can|could|should|will|would|"
-    r"please|pls|log|set|show|tell|i|i'm|im|my|me|we|hey|hi|hello)\b",
+    r"please|pls|log|set|show|tell|i|i'm|im|my|me)\b",
     re.IGNORECASE,
 )
 
@@ -179,7 +180,11 @@ def looks_like_bank_sms(text: str) -> bool:
         return False
     if not _BANK_MARKER_RE.search(text):
         return False
-    has_amount = _parse_amount(text) is not None or _BARE_AMOUNT_RE.search(text) is not None
+    # A bare number ("credited 50000") only counts next to a masked account
+    # number (XX1234) — a person typing "salary credited 50000 in my
+    # account" never writes one.
+    has_bare_amount = _BARE_AMOUNT_RE.search(text) is not None and _ACCOUNT_MASK_RE.search(text) is not None
+    has_amount = _parse_amount(text) is not None or has_bare_amount
     return has_amount or is_not_a_transaction(text)
 
 

@@ -46,26 +46,44 @@ async def remember_merchant_category(session: AsyncSession, user_id: UUID, merch
 
 
 async def recall_merchant_category(session: AsyncSession, user_id: UUID, merchant: str | None) -> str | None:
-    """The category the user chose for this merchant before, or None.
+    """The category the user chose for this SAME merchant before, or None.
 
-    Exact match first. Otherwise a fuzzy match, so "ZOMATO LTD",
-    "zomato@hdfc" and "Zomato" are the same merchant — but only when every
-    similar remembered merchant agrees on one category (two different
-    answers means we can't be sure, so return None and let the agent/user
-    decide)."""
+    Trusted enough to log an expense without asking, so it only matches the
+    same name — written the same way, or with the same words once the UPI
+    handle and "ltd"/"pvt" are dropped ("ZOMATO LTD" = "zomato@hdfc"). Looser
+    matches are only a hint: see suggest_merchant_category."""
     key = normalize_merchant(merchant) if merchant else ""
     if not key:
         return None
-
-    rows = (await session.execute(select(MerchantCategory).where(MerchantCategory.user_id == user_id))).scalars().all()
+    rows = await _remembered(session, user_id)
     for row in rows:
         if row.merchant == key:
             return row.category
+    words = merchant_words(key)
+    same_words = {row.category for row in rows if words and merchant_words(row.merchant) == words}
+    if len(same_words) == 1:
+        return same_words.pop()
+    return None
 
+
+async def suggest_merchant_category(session: AsyncSession, user_id: UUID, merchant: str | None) -> str | None:
+    """A category from a SIMILAR remembered merchant ("swigy" ~ "swiggy",
+    "rahul" ~ "rahul sharma") — only a hint for the agent, never used to log
+    on its own: similar names can be different people or businesses.
+    None unless every similar merchant agrees on one category."""
+    key = normalize_merchant(merchant) if merchant else ""
+    if not key:
+        return None
+    rows = await _remembered(session, user_id)
     similar_categories = {row.category for row in rows if similar_merchants(key, row.merchant)}
     if len(similar_categories) == 1:
         return similar_categories.pop()
     return None
+
+
+async def _remembered(session: AsyncSession, user_id: UUID) -> list[MerchantCategory]:
+    result = await session.execute(select(MerchantCategory).where(MerchantCategory.user_id == user_id))
+    return list(result.scalars().all())
 
 
 # Words that don't help tell merchants apart.

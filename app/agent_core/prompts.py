@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from app.categories import CATEGORIES
 
-PROMPT_VERSION = "v1"
+PROMPT_VERSION = "v2"
 
 _CATEGORY_LIST = ", ".join(CATEGORIES.values())
 
@@ -22,6 +22,9 @@ How to work:
 - Link only to an id returned by find_matching_expenses, when amount, date and merchant fit.
 - Categories: {_CATEGORY_LIST}. Never invent another name.
 - A remembered category for this merchant is the user's own past choice: use it.
+- A similar_merchant_category_hint comes from a merchant with a SIMILAR name, which
+  may be a different person or shop. It is only a hint: use it as your
+  suggested_category when you ask, never as a reason to log on your own.
 - Payments to a person's name (not a business), cash withdrawals and unknown shops: ask.
 - Don't use "Other" because you are unsure — ask instead.
 - Never use Savings. Only the app itself files transfers to your own savings account.

@@ -397,7 +397,8 @@ from agent_steps where run_id = '<id>' order by step_no;
 
 You save a different amount every month, so nothing assumes a percentage:
 
-1. `/myaccount savings 4321` once (last 4 digits of your savings account).
+1. `/myaccount savings 4321` once (last 4 digits of your savings account),
+   and optionally `/myaccount main 1234` (the account your salary arrives in).
 2. Forward your salary SMS → recorded as income of kind `salary`.
 3. Forward the SMS when you move money to savings (any amount, any number of
    times) → filed as `Savings`, not spending.

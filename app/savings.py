@@ -35,8 +35,8 @@ SAVINGS_WITHDRAWAL = "savings_withdrawal"
 # number: "to A/c ", "credited to a/c no. ", "From HDFC Bank A/C ", "Benef A/c ".
 # Further away, the preposition belongs to something else ("sent to Ramesh
 # via UPI. A/c XX4321 debited" — the "to" is about Ramesh).
-_TO_BEFORE_RE = re.compile(r"\b(?:to|benef|beneficiary)\b\W+(?:[\w/.]+\W+){0,3}$", re.IGNORECASE)
-_FROM_BEFORE_RE = re.compile(r"\b(?:from|by)\b\W+(?:[\w/.]+\W+){0,3}$", re.IGNORECASE)
+_PREPOSITION_RE = re.compile(r"\b(to|benef|beneficiary|from|by)\b", re.IGNORECASE)
+_WORD_RE = re.compile(r"[\w/.]+")
 # The account itself is what got debited/credited: "A/c XX4321 debited ...".
 _DEBITED_AFTER_RE = re.compile(r"^\W*(?:is\s+|has been\s+|was\s+)?(?:debited|transferred)\b", re.IGNORECASE)
 _CREDITED_AFTER_RE = re.compile(r"^\W*(?:is\s+|has been\s+|was\s+)?credited\b", re.IGNORECASE)
@@ -56,6 +56,18 @@ def _account_mention_re(last4: str) -> re.Pattern[str]:
     )
 
 
+def _nearest_preposition(text_before: str) -> str | None:
+    """'to' or 'from' for the LAST preposition before the account number —
+    only if at most 3 words sit between them."""
+    matches = list(_PREPOSITION_RE.finditer(text_before))
+    if not matches:
+        return None
+    last = matches[-1]
+    if len(_WORD_RE.findall(text_before[last.end() :])) > 3:
+        return None
+    return "to" if last.group(1).lower() in ("to", "benef", "beneficiary") else "from"
+
+
 def account_direction(text: str, last4: str) -> str | None:
     """Where the money goes relative to this account:
     'to'   — money goes INTO it   ("... credited to A/c XX4321", "A/c XX4321 credited"),
@@ -64,19 +76,25 @@ def account_direction(text: str, last4: str) -> str | None:
     for mention in _account_mention_re(last4).finditer(text):
         text_before = text[max(0, mention.start() - 40) : mention.start()]
         text_after = text[mention.end() : mention.end() + 25]
-        if _CREDITED_AFTER_RE.search(text_after) or _TO_BEFORE_RE.search(text_before):
+        if _CREDITED_AFTER_RE.search(text_after):
             return "to"
-        if _DEBITED_AFTER_RE.search(text_after) or _FROM_BEFORE_RE.search(text_before):
+        if _DEBITED_AFTER_RE.search(text_after):
             return "from"
+        direction = _nearest_preposition(text_before)
+        if direction is not None:
+            return direction
     return None
+
+
+async def own_accounts(session: AsyncSession, user_id: UUID, kind: str) -> list[str]:
+    """Last 4 digits of the user's registered accounts of one kind ('savings' or 'main')."""
+    rows = await session.execute(select(OwnAccount.last4).where(OwnAccount.user_id == user_id, OwnAccount.kind == kind))
+    return list(rows.scalars().all())
 
 
 async def savings_accounts(session: AsyncSession, user_id: UUID) -> list[str]:
     """Last 4 digits of every savings account the user registered."""
-    rows = await session.execute(
-        select(OwnAccount.last4).where(OwnAccount.user_id == user_id, OwnAccount.kind == "savings")
-    )
-    return list(rows.scalars().all())
+    return await own_accounts(session, user_id, "savings")
 
 
 def is_transfer_to_savings(text: str, savings_last4s: list[str]) -> bool:
@@ -92,20 +110,19 @@ def is_money_arriving_in_savings(text: str, savings_last4s: list[str]) -> bool:
     return any(account_direction(text, last4) == "to" for last4 in savings_last4s)
 
 
-_TO_AN_ACCOUNT_RE = re.compile(r"\bto\s+(?:your\s+)?(?:a/c|ac|acct|account)\b", re.IGNORECASE)
-
-
-def is_savings_side_of_a_transfer(text: str, is_debit: bool, savings_last4s: list[str]) -> bool:
+def is_savings_side_of_a_transfer(text: str, is_debit: bool, savings_last4s: list[str], main_last4s: list[str]) -> bool:
     """The savings bank's own SMS for a move between your accounts:
     - a credit INTO savings ("A/c XX4321 credited with Rs.35,000 from XX1234"), or
-    - a debit OUT of savings to another account ("Rs.3000 transferred from
-      A/c XX4321 to A/c XX1234").
+    - a debit OUT of savings to your registered main account ("Rs.3000
+      transferred from A/c XX4321 to A/c XX1234", with /myaccount main 1234).
     The same move is counted from your main account's SMS, so this side is
-    skipped — otherwise it would count twice (as income, or as spending)."""
+    skipped — otherwise it would count twice (as income, or as spending).
+    A debit from savings to anyone else is real spending and is NOT skipped."""
     if not is_debit:
         return is_money_arriving_in_savings(text, savings_last4s)
     leaves_savings = any(account_direction(text, last4) == "from" for last4 in savings_last4s)
-    return leaves_savings and _TO_AN_ACCOUNT_RE.search(text) is not None
+    goes_to_main = any(account_direction(text, last4) == "to" for last4 in main_last4s)
+    return leaves_savings and goes_to_main
 
 
 def is_withdrawal_from_savings(text: str, savings_last4s: list[str]) -> bool:

@@ -32,6 +32,7 @@ from app.savings import (
     income_kind,
     is_savings_side_of_a_transfer,
     is_transfer_to_savings,
+    own_accounts,
     savings_accounts,
 )
 from app.timeutil import local_today
@@ -122,7 +123,8 @@ async def ingest_sms_transaction(
 
     savings_last4s = await savings_accounts(session, user.id)
 
-    if is_savings_side_of_a_transfer(raw_text, parsed.is_debit, savings_last4s):
+    main_last4s = await own_accounts(session, user.id, "main")
+    if is_savings_side_of_a_transfer(raw_text, parsed.is_debit, savings_last4s, main_last4s):
         logger.info("user=%s: savings account's side of a transfer — counted from the other side, skipping", user.id)
         return SmsIngestResult(outcome="savings_side_skipped", amount=parsed.amount, txn_date=parsed.txn_date)
 

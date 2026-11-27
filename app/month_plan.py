@@ -45,8 +45,9 @@ def plan_period(today: date, payday: int | None) -> tuple[date, date]:
     (or payday 1) it is the calendar month."""
     if payday is None or payday <= 1:
         start = today.replace(day=1)
-    elif today.day >= payday:
-        start = today.replace(day=payday)
+    elif today.day >= min(payday, calendar.monthrange(today.year, today.month)[1]):
+        # (payday 31 in a 30-day month is the 30th)
+        start = today.replace(day=min(payday, calendar.monthrange(today.year, today.month)[1]))
     else:
         last_day_of_previous_month = today.replace(day=1) - timedelta(days=1)
         start = last_day_of_previous_month.replace(day=min(payday, last_day_of_previous_month.day))

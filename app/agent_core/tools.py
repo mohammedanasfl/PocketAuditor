@@ -30,7 +30,7 @@ from app.agent import (
 )
 from app.categories import CATEGORIES, normalize_category
 from app.llm.base import ToolSpec
-from app.merchant_memory import recall_merchant_category
+from app.merchant_memory import recall_merchant_category, suggest_merchant_category
 from app.models import Transaction
 from app.schemas import MatchDecision
 
@@ -89,7 +89,10 @@ async def find_matching_expenses(ctx: ToolContext, args: NoArgs) -> dict:
 async def recall_merchant(ctx: ToolContext, args: NoArgs) -> dict:
     assert ctx.transaction is not None
     category = await recall_merchant_category(ctx.session, ctx.user_id, ctx.transaction.merchant)
-    return {"remembered_category": category}
+    hint = None
+    if category is None:
+        hint = await suggest_merchant_category(ctx.session, ctx.user_id, ctx.transaction.merchant)
+    return {"remembered_category": category, "similar_merchant_category_hint": hint}
 
 
 async def check_duplicate_charge(ctx: ToolContext, args: NoArgs) -> dict:

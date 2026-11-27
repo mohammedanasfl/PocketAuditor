@@ -21,7 +21,7 @@ from app.models import OwnAccount
 from app.month_plan import get_month_plan
 from app.reports import get_spend_summary
 from app.salary import format_salary_profile, get_salary_profile, upsert_salary_profile
-from app.savings import savings_accounts
+from app.savings import own_accounts
 from app.telegram.handlers._shared import _get_or_create_user
 from app.telegram.handlers.callbacks import send_ask_user_message, send_audit_question
 from app.telegram.handlers.messages import answer_chat_message
@@ -301,28 +301,36 @@ async def handle_myaccount_command(update: Update, context: ContextTypes.DEFAULT
     if update.message is None:
         return
     args = context.args or []
-    usage = "Usage: /myaccount savings <last 4 digits>, e.g. /myaccount savings 4321"
+    usage = (
+        "Usage: /myaccount savings <last 4 digits> (your savings account)\n"
+        "or /myaccount main <last 4 digits> (the account your salary comes into)"
+    )
 
     async with SessionLocal() as session:
         user = await _get_or_create_user(session, update.effective_chat.id)
         if not args:
-            accounts = await savings_accounts(session, user.id)
-            if accounts:
-                listed = ", ".join(f"XX{last4}" for last4 in accounts)
-                await update.message.reply_text(f"Your savings account(s): {listed}\n{usage}")
-            else:
-                await update.message.reply_text(f"No savings account saved yet.\n{usage}")
+            savings = await own_accounts(session, user.id, "savings")
+            main = await own_accounts(session, user.id, "main")
+            listed = [f"savings XX{last4}" for last4 in savings] + [f"main XX{last4}" for last4 in main]
+            saved = ", ".join(listed) if listed else "none yet"
+            await update.message.reply_text(f"Your accounts: {saved}\n{usage}")
             return
 
-        if len(args) != 2 or args[0].lower() != "savings" or not (len(args[1]) == 4 and args[1].isdigit()):
+        kind = args[0].lower() if args else ""
+        if len(args) != 2 or kind not in ("savings", "main") or not (len(args[1]) == 4 and args[1].isdigit()):
             await update.message.reply_text(usage)
             return
-        await insert_once(session, OwnAccount(user_id=user.id, last4=args[1], kind="savings"))
+        added = await insert_once(session, OwnAccount(user_id=user.id, last4=args[1], kind=kind))
 
-    await update.message.reply_text(
-        f"✅ Saved. Transfers to XX{args[1]} now count as savings, "
-        "and money taken back from it isn't counted as income."
-    )
+    if not added:
+        await update.message.reply_text(f"XX{args[1]} is already saved.")
+    elif kind == "savings":
+        await update.message.reply_text(
+            f"✅ Saved. Transfers to XX{args[1]} now count as savings, "
+            "and money taken back from it isn't counted as income."
+        )
+    else:
+        await update.message.reply_text(f"✅ Saved XX{args[1]} as your main account.")
 
 
 async def handle_audit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
