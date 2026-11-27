@@ -45,6 +45,7 @@ class ScenarioResult:
     unnecessary_ask: bool = False
     llm_calls: int = 0
     seconds: float = 0.0
+    tokens: int = 0
 
 
 def load_scenarios(suite: str) -> list[dict]:
@@ -224,6 +225,7 @@ def write_report(suite: str, engine: str, provider_name: str, model: str | None,
     asks = sum(1 for r in results if r.unnecessary_ask)
     calls = sum(r.llm_calls for r in results)
     seconds = sum(r.seconds for r in results)
+    tokens = sum(r.tokens for r in results)
 
     lines = [
         f"# Eval: {suite} — engine={engine}, provider={provider_name}" + (f" ({model})" if model else ""),
@@ -237,6 +239,7 @@ def write_report(suite: str, engine: str, provider_name: str, model: str | None,
         f"| Unnecessary asks | {asks} |",
         f"| LLM calls | {calls} ({calls / total:.1f} per scenario) |",
         f"| LLM time | {seconds:.1f}s ({seconds / total:.2f}s per scenario) |",
+        f"| Agent tokens | {tokens} ({tokens / total:.0f} per scenario) |",
         "",
         "| Scenario | Expected | Got | Result |",
         "|---|---|---|---|",
@@ -271,6 +274,7 @@ async def main() -> None:
                 result = await run_reconcile_scenario(scenario, provider, args.engine, Path(tmp))
             result.llm_calls = provider.calls
             result.seconds = provider.seconds
+            result.tokens = provider.input_tokens + provider.output_tokens
             results.append(result)
             print(
                 f"{'PASS' if result.correct else 'FAIL'}  {result.scenario_id}  ({time.perf_counter() - started:.1f}s)"

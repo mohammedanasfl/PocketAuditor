@@ -10,7 +10,7 @@ from decimal import Decimal, InvalidOperation
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from app.agent import reconcile_user
+from app.agent_core.reconcile import reconcile
 from app.audit import run_monthly_audit
 from app.budgets import format_budgets_message, get_budget_statuses, upsert_budget
 from app.categories import CATEGORIES, normalize_category
@@ -352,7 +352,7 @@ async def handle_reconcile_command(update: Update, context: ContextTypes.DEFAULT
 
     async with SessionLocal() as session:
         user = await _get_or_create_user(session, chat_id)
-        summary = await reconcile_user(session, provider, user.id)
+        summary = await reconcile(session, provider, user.id)
 
     logger.info("chat=%s: reconcile finished — %s", chat_id, summary.as_message())
 

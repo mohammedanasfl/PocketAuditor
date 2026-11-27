@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from telegram.ext import Application
 
-from app.agent import reconcile_user
+from app.agent_core.reconcile import reconcile
 from app.audit import check_midmonth_alerts, run_monthly_audit
 from app.budgets import check_budget_alerts
 from app.config import settings
@@ -44,7 +44,7 @@ async def reconcile_all_users(application: Application) -> None:
     for user in users:
         try:
             async with SessionLocal() as session:
-                summary = await reconcile_user(session, provider, user.id)
+                summary = await reconcile(session, provider, user.id)
             logger.info("background reconcile: user=%s — %s", user.id, summary.as_message())
 
             for pending in summary.pending_questions:

@@ -11,7 +11,14 @@ from anthropic import AsyncAnthropic
 from pydantic import ValidationError
 
 from app.config import settings
-from app.llm.base import LLMDecisionError, sanitize_schema_for_llm
+from app.llm.base import (
+    AssistantTurn,
+    ChatMessage,
+    LLMDecisionError,
+    ToolCall,
+    ToolSpec,
+    sanitize_schema_for_llm,
+)
 from app.llm.prompts import (
     AUDIT_SYSTEM,
     DECIDE_SYSTEM,
@@ -32,7 +39,7 @@ logger = logging.getLogger(__name__)
 class ClaudeProvider:
     """Implements LLMProvider against the Claude Messages API using structured
     outputs (output_config.format) so the response is constrained to the same
-    schema Ollama is constrained to.
+    schema Gemini is constrained to.
 
     Deliberately does not set temperature/top_p: claude-sonnet-5 (and the rest
     of the 4.6+ model family) reject non-default sampling parameters with a
@@ -156,3 +163,67 @@ class ClaudeProvider:
             intent.date_range,
         )
         return intent
+
+    # --- tool calling (agent loop) ----------------------------------------
+
+    async def chat_with_tools(self, system: str, messages: list[ChatMessage], tools: list[ToolSpec]) -> AssistantTurn:
+        logger.info("Claude.chat_with_tools: model=%s messages=%d tools=%d", self._model, len(messages), len(tools))
+        claude_tools = [
+            {"name": tool.name, "description": tool.description, "input_schema": tool.parameters} for tool in tools
+        ]
+        try:
+            # Plain dicts don't match the SDK's strict TypedDicts for mypy;
+            # the request shape is covered by tests/test_agent_core.py.
+            response = await self._client.messages.create(
+                model=self._model,
+                max_tokens=2048,
+                system=system,
+                messages=_to_claude_messages(messages),  # type: ignore[arg-type]
+                tools=claude_tools,  # type: ignore[arg-type]
+            )
+        except anthropic.APIError as exc:
+            raise LLMDecisionError(f"Claude request failed: {exc}") from exc
+
+        text_parts: list[str] = []
+        tool_calls: list[ToolCall] = []
+        raw_blocks: list[dict] = []
+        for block in response.content:
+            if block.type == "text":
+                text_parts.append(block.text)
+                raw_blocks.append({"type": "text", "text": block.text})
+            elif block.type == "tool_use":
+                tool_calls.append(ToolCall(id=block.id, name=block.name, args=dict(block.input or {})))
+                raw_blocks.append({"type": "tool_use", "id": block.id, "name": block.name, "input": block.input})
+
+        return AssistantTurn(
+            text="".join(text_parts).strip(),
+            tool_calls=tool_calls,
+            input_tokens=response.usage.input_tokens,
+            output_tokens=response.usage.output_tokens,
+            raw=raw_blocks,
+        )
+
+
+def _to_claude_messages(messages: list[ChatMessage]) -> list[dict]:
+    """Convert our ChatMessages to Claude's format. Tool results that follow
+    each other go into one user message, as Claude requires."""
+    result: list[dict] = []
+    for message in messages:
+        if message.role == "user":
+            result.append({"role": "user", "content": message.text})
+        elif message.role == "assistant":
+            assert message.turn is not None
+            result.append({"role": "assistant", "content": message.turn.raw})
+        else:
+            assert message.tool_call is not None
+            block = {
+                "type": "tool_result",
+                "tool_use_id": message.tool_call.id,
+                "content": json.dumps(message.result, default=str),
+            }
+            previous = result[-1] if result else None
+            if previous is not None and previous["role"] == "user" and isinstance(previous["content"], list):
+                previous["content"].append(block)
+            else:
+                result.append({"role": "user", "content": [block]})
+    return result

@@ -1,5 +1,5 @@
 """End-to-end provider parity: run the *full* agent loop twice — once against
-OllamaProvider (respx-mocked HTTP), once against ClaudeProvider (monkeypatched
+GeminiProvider (monkeypatched genai client), once against ClaudeProvider (monkeypatched
 Anthropic client) — feeding both the same underlying model JSON, and assert
 the resulting expenses + reconciliation_runs rows match. This is the concrete
 test the brief calls for ("assert the decision loop behaves identically
@@ -14,18 +14,14 @@ from datetime import date
 from decimal import Decimal
 from types import SimpleNamespace
 
-import respx
-from httpx import Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.agent import reconcile_user
 from app.db import Base
 from app.llm.claude import ClaudeProvider
-from app.llm.ollama import OllamaProvider
+from app.llm.gemini import GeminiProvider
 from app.models import Expense, ReconciliationRun, Transaction, User
-
-OLLAMA_URL = "http://localhost:11434/api/chat"
 
 
 async def _fresh_session(tmp_path, name: str):
@@ -67,16 +63,19 @@ def _decision_json() -> str:
     )
 
 
-@respx.mock
 async def test_agent_loop_produces_identical_writes_across_providers(tmp_path, monkeypatch):
     decision_json = _decision_json()
 
-    # --- Ollama run ---
-    ollama_engine, ollama_session = await _fresh_session(tmp_path, "ollama")
-    ollama_user = await _seed(ollama_session)
-    respx.post(OLLAMA_URL).mock(return_value=Response(200, json={"message": {"content": decision_json}}))
-    ollama_provider = OllamaProvider(base_url="http://localhost:11434", model="qwen2.5:7b")
-    ollama_summary = await reconcile_user(ollama_session, ollama_provider, ollama_user.id)
+    # --- Gemini run ---
+    gemini_engine, gemini_session = await _fresh_session(tmp_path, "gemini")
+    gemini_user = await _seed(gemini_session)
+
+    async def fake_generate(**kwargs):
+        return SimpleNamespace(text=decision_json)
+
+    gemini_provider = GeminiProvider(api_key="test-key", model="gemini-3.5-flash-lite")
+    monkeypatch.setattr(gemini_provider._client.aio.models, "generate_content", fake_generate)
+    gemini_summary = await reconcile_user(gemini_session, gemini_provider, gemini_user.id)
 
     # --- Claude run ---
     claude_engine, claude_session = await _fresh_session(tmp_path, "claude")
@@ -89,23 +88,23 @@ async def test_agent_loop_produces_identical_writes_across_providers(tmp_path, m
     monkeypatch.setattr(claude_provider._client.messages, "create", fake_create)
     claude_summary = await reconcile_user(claude_session, claude_provider, claude_user.id)
 
-    assert ollama_summary.auto_logged == claude_summary.auto_logged == 1
-    assert ollama_summary.as_message() == claude_summary.as_message()
+    assert gemini_summary.auto_logged == claude_summary.auto_logged == 1
+    assert gemini_summary.as_message() == claude_summary.as_message()
 
-    ollama_expense = (await ollama_session.execute(select(Expense))).scalar_one()
+    gemini_expense = (await gemini_session.execute(select(Expense))).scalar_one()
     claude_expense = (await claude_session.execute(select(Expense))).scalar_one()
-    assert ollama_expense.amount == claude_expense.amount
-    assert ollama_expense.category == claude_expense.category
-    assert ollama_expense.created_via == claude_expense.created_via
-    assert ollama_expense.merchant == claude_expense.merchant
+    assert gemini_expense.amount == claude_expense.amount
+    assert gemini_expense.category == claude_expense.category
+    assert gemini_expense.created_via == claude_expense.created_via
+    assert gemini_expense.merchant == claude_expense.merchant
 
-    ollama_run = (await ollama_session.execute(select(ReconciliationRun))).scalar_one()
+    gemini_run = (await gemini_session.execute(select(ReconciliationRun))).scalar_one()
     claude_run = (await claude_session.execute(select(ReconciliationRun))).scalar_one()
-    assert ollama_run.decision == claude_run.decision
-    assert ollama_run.confidence == claude_run.confidence
-    assert ollama_run.status == claude_run.status
+    assert gemini_run.decision == claude_run.decision
+    assert gemini_run.confidence == claude_run.confidence
+    assert gemini_run.status == claude_run.status
 
-    await ollama_session.close()
+    await gemini_session.close()
     await claude_session.close()
-    await ollama_engine.dispose()
+    await gemini_engine.dispose()
     await claude_engine.dispose()

@@ -250,3 +250,53 @@ class BudgetAlertSent(Base):
     category: Mapped[str] = mapped_column(String(50), nullable=False)
     month: Mapped[date] = mapped_column(Date, nullable=False)
     sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AgentRun(Base):
+    """One run of the tool-using agent (app/agent_core/loop.py): what started
+    it, how it ended, and what it cost. Together with AgentStep this is the
+    trace — every model reply and every tool call, queryable with SQL."""
+
+    __tablename__ = "agent_runs"
+    __table_args__ = (Index("ix_agent_runs_user_day", "user_id", "run_date"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("users.id"), nullable=False)
+    # 'sms' | 'chat' | 'cron'
+    trigger: Mapped[str] = mapped_column(String(20), nullable=False)
+    goal: Mapped[str] = mapped_column(Text, nullable=False)
+    # 'running' | 'done' | 'failed' | 'stopped' (hit the step or token limit)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="running")
+    final_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    steps: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    latency_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    model: Mapped[str] = mapped_column(String(80), nullable=False)
+    prompt_version: Mapped[str] = mapped_column(String(20), nullable=False)
+    # The local date the run started — used for the per-user daily run limit.
+    run_date: Mapped[date] = mapped_column(Date, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AgentStep(Base):
+    """One step of an AgentRun: a model reply ('model') or a tool call ('tool')."""
+
+    __tablename__ = "agent_steps"
+    __table_args__ = (Index("ix_agent_steps_run", "run_id", "step_no"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    run_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("agent_runs.id"), nullable=False)
+    step_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    # 'model' | 'tool'
+    kind: Mapped[str] = mapped_column(String(10), nullable=False)
+    tool_name: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    # JSON text, cut to a few KB — enough to debug, not a full copy.
+    args: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Policy verdict for tool steps: 'allow' | 'ask' | 'deny' | 'error'
+    verdict: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    latency_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

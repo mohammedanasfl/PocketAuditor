@@ -1,4 +1,4 @@
-"""Gemini-backed LLMProvider — free-tier alternative to Claude for prod.
+"""Gemini-backed LLMProvider — the default provider for development and production.
 
 Uses response_json_schema (not the older response_schema) because Pydantic's
 generated schemas express nullable fields (`X | None`) via `anyOf`, which the
@@ -18,7 +18,14 @@ from google.genai import types
 from pydantic import ValidationError
 
 from app.config import settings
-from app.llm.base import LLMDecisionError, sanitize_schema_for_llm
+from app.llm.base import (
+    AssistantTurn,
+    ChatMessage,
+    LLMDecisionError,
+    ToolCall,
+    ToolSpec,
+    sanitize_schema_for_llm,
+)
 from app.llm.prompts import (
     AUDIT_SYSTEM,
     DECIDE_SYSTEM,
@@ -39,7 +46,7 @@ logger = logging.getLogger(__name__)
 class GeminiProvider:
     """Implements LLMProvider against Google's Gemini API using structured
     outputs (response_json_schema + response_mime_type=application/json) —
-    the same schema-constrained-JSON contract Claude/Ollama are held to.
+    the same schema-constrained-JSON contract Claude is held to.
     """
 
     def __init__(self, api_key: str | None = None, model: str | None = None) -> None:
@@ -148,3 +155,83 @@ class GeminiProvider:
             intent.date_range,
         )
         return intent
+
+    # --- tool calling (agent loop) ----------------------------------------
+
+    async def chat_with_tools(self, system: str, messages: list[ChatMessage], tools: list[ToolSpec]) -> AssistantTurn:
+        logger.info("Gemini.chat_with_tools: model=%s messages=%d tools=%d", self._model, len(messages), len(tools))
+        declarations = [
+            types.FunctionDeclaration(
+                name=tool.name,
+                description=tool.description,
+                parameters_json_schema=sanitize_schema_for_llm(tool.parameters),
+            )
+            for tool in tools
+        ]
+        try:
+            response = await self._client.aio.models.generate_content(
+                model=self._model,
+                contents=_to_gemini_contents(messages),
+                config=types.GenerateContentConfig(
+                    system_instruction=system,
+                    tools=[types.Tool(function_declarations=declarations)],
+                    # We run the tools ourselves (after the policy check), so
+                    # the SDK must never call Python functions on its own.
+                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+                ),
+            )
+        except (genai_errors.APIError, httpx.HTTPError) as exc:
+            raise LLMDecisionError(f"Gemini request failed: {exc}") from exc
+
+        if not response.candidates or response.candidates[0].content is None:
+            raise LLMDecisionError("Gemini returned no content (likely blocked)")
+        content = response.candidates[0].content
+
+        text_parts: list[str] = []
+        tool_calls: list[ToolCall] = []
+        for part in content.parts or []:
+            call = part.function_call
+            if call is not None and call.name:
+                call_id = call.id or f"call_{len(tool_calls)}"
+                tool_calls.append(ToolCall(id=call_id, name=call.name, args=dict(call.args or {})))
+            elif part.text and not part.thought:
+                text_parts.append(part.text)
+
+        usage = response.usage_metadata
+        return AssistantTurn(
+            text="".join(text_parts).strip(),
+            tool_calls=tool_calls,
+            input_tokens=(usage.prompt_token_count or 0) if usage else 0,
+            output_tokens=(usage.candidates_token_count or 0) if usage else 0,
+            raw=content,
+        )
+
+
+def _to_gemini_contents(messages: list[ChatMessage]) -> list[types.Content]:
+    """Convert our ChatMessages to Gemini Contents. Tool results that follow
+    each other go into one Content, as Gemini expects for parallel calls."""
+    contents: list[types.Content] = []
+    for message in messages:
+        if message.role == "user":
+            contents.append(types.Content(role="user", parts=[types.Part(text=message.text)]))
+        elif message.role == "assistant":
+            assert message.turn is not None
+            # Send the model's own reply back unchanged (keeps thought signatures).
+            contents.append(message.turn.raw)
+        else:
+            assert message.tool_call is not None
+            part = types.Part.from_function_response(name=message.tool_call.name, response=message.result)
+            gemini_gave_an_id = not message.tool_call.id.startswith("call_")  # "call_N" ids are our own
+            if part.function_response is not None and gemini_gave_an_id:
+                part.function_response.id = message.tool_call.id
+            previous = contents[-1] if contents else None
+            if previous is not None and previous.role == "user" and _is_tool_results(previous):
+                assert previous.parts is not None
+                previous.parts.append(part)
+            else:
+                contents.append(types.Content(role="user", parts=[part]))
+    return contents
+
+
+def _is_tool_results(content: types.Content) -> bool:
+    return bool(content.parts) and all(part.function_response is not None for part in content.parts or [])

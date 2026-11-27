@@ -5,7 +5,7 @@ prove it against mocks (see tests/test_llm_providers.py).
 
 Usage:
     python -m scripts.try_decide            # uses LLM_PROVIDER from .env
-    python -m scripts.try_decide --both      # runs Ollama AND Claude side by side
+    python -m scripts.try_decide --both      # runs Gemini AND Claude side by side
                                               # (requires ANTHROPIC_API_KEY)
 """
 
@@ -48,14 +48,14 @@ async def _run(label: str, provider) -> None:
 
 async def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--both", action="store_true", help="run both Ollama and Claude side by side")
+    parser.add_argument("--both", action="store_true", help="run both Gemini and Claude side by side")
     args = parser.parse_args()
 
     if args.both:
         from app.llm.claude import ClaudeProvider
-        from app.llm.ollama import OllamaProvider
+        from app.llm.gemini import GeminiProvider
 
-        await _run("Ollama", OllamaProvider())
+        await _run("Gemini", GeminiProvider())
         await _run("Claude", ClaudeProvider())
     else:
         await _run(settings.llm_provider, get_provider())

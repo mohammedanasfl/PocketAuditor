@@ -33,7 +33,7 @@ async def send_ask_user_message(bot: Bot, chat_id: int, pending: PendingQuestion
 
     async with SessionLocal() as session:
         run = await session.get(ReconciliationRun, pending.run_id)
-        # app.agent._act just created this run in the same reconcile pass —
+        # app.agent.act_on_decision just created this run in the same reconcile pass —
         # guaranteed to still resolve here.
         assert run is not None
         run.telegram_message_id = message.message_id

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import time
 
-from app.llm.base import LLMDecisionError, LLMProvider
+from app.llm.base import AssistantTurn, ChatMessage, LLMDecisionError, LLMProvider, ToolSpec
 from app.schemas import AuditReport, ExtractedReceipt, LLMExtraction, MatchDecision, QueryIntent
 
 
@@ -32,6 +32,9 @@ class NoLLMProvider:
     async def audit_finances(self, snapshot: dict) -> AuditReport:
         raise LLMDecisionError("no LLM in this eval run")
 
+    async def chat_with_tools(self, system: str, messages: list[ChatMessage], tools: list[ToolSpec]) -> AssistantTurn:
+        raise LLMDecisionError("no LLM in this eval run")
+
 
 class CountingProvider:
     """Passes every call through to `inner`, counting calls and seconds."""
@@ -40,10 +43,14 @@ class CountingProvider:
         self.inner = inner
         self.calls = 0
         self.seconds = 0.0
+        self.input_tokens = 0
+        self.output_tokens = 0
 
     def reset(self) -> None:
         self.calls = 0
         self.seconds = 0.0
+        self.input_tokens = 0
+        self.output_tokens = 0
 
     def _start(self) -> float:
         self.calls += 1
@@ -86,6 +93,16 @@ class CountingProvider:
             return await self.inner.audit_finances(snapshot)
         finally:
             self._stop(started)
+
+    async def chat_with_tools(self, system: str, messages: list[ChatMessage], tools: list[ToolSpec]) -> AssistantTurn:
+        started = self._start()
+        try:
+            turn = await self.inner.chat_with_tools(system, messages, tools)
+        finally:
+            self._stop(started)
+        self.input_tokens += turn.input_tokens
+        self.output_tokens += turn.output_tokens
+        return turn
 
 
 def make_provider(name: str, model: str | None) -> LLMProvider:

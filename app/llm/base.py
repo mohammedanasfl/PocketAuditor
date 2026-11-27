@@ -7,7 +7,8 @@ tests stay cheap.
 
 from __future__ import annotations
 
-from typing import Protocol
+from dataclasses import dataclass, field
+from typing import Any, Literal, Protocol
 
 from app.schemas import AuditReport, ExtractedReceipt, LLMExtraction, MatchDecision, QueryIntent
 
@@ -15,6 +16,61 @@ from app.schemas import AuditReport, ExtractedReceipt, LLMExtraction, MatchDecis
 class LLMDecisionError(RuntimeError):
     """Raised when a provider cannot produce a schema-valid response, even
     after its retry budget (if any) is exhausted."""
+
+
+# --- Tool calling (used by the agent loop in app/agent_core/) ---------------
+# Our own small, provider-neutral types. Each provider converts to and from
+# its SDK's format, so the agent loop never sees a vendor type.
+
+
+@dataclass
+class ToolSpec:
+    """A tool the model may call: name, what it does, and a JSON Schema for
+    its arguments (generated from a Pydantic model, never hand-written)."""
+
+    name: str
+    description: str
+    parameters: dict
+
+
+@dataclass
+class ToolCall:
+    """One tool call the model asked for."""
+
+    id: str
+    name: str
+    args: dict
+
+
+@dataclass
+class AssistantTurn:
+    """The model's reply: either text, or one or more tool calls (or both).
+
+    `raw` is the provider's own copy of the reply. It is sent back unchanged
+    in the next request, because some models (Gemini 3.x) attach hidden
+    "thought signatures" that must be returned as-is."""
+
+    text: str
+    tool_calls: list[ToolCall]
+    input_tokens: int = 0
+    output_tokens: int = 0
+    raw: Any = None
+
+
+@dataclass
+class ChatMessage:
+    """One entry of the conversation the agent loop keeps.
+
+    - role "user": `text` is the user's message or the goal.
+    - role "assistant": `turn` is what the model replied.
+    - role "tool": `tool_call` is the call being answered, `result` its output.
+    """
+
+    role: Literal["user", "assistant", "tool"]
+    text: str = ""
+    turn: AssistantTurn | None = None
+    tool_call: ToolCall | None = None
+    result: dict = field(default_factory=dict)
 
 
 class LLMProvider(Protocol):
@@ -37,6 +93,12 @@ class LLMProvider(Protocol):
         """Turn a natural-language question (Phase 3b's /ask) into a fixed
         query intent — never SQL, never anything app/query.py would need to
         trust beyond its declared shape."""
+        ...
+
+    async def chat_with_tools(self, system: str, messages: list[ChatMessage], tools: list[ToolSpec]) -> AssistantTurn:
+        """One step of the agent loop: send the conversation so far plus the
+        available tools, get back text and/or tool calls. Raises
+        LLMDecisionError on any provider failure."""
         ...
 
     async def audit_finances(self, snapshot: dict) -> AuditReport:

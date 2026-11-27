@@ -1,5 +1,5 @@
 """End-to-end provider parity for the monthly audit: run run_monthly_audit
-twice — once against OllamaProvider (respx-mocked), once against ClaudeProvider
+twice — once against GeminiProvider (monkeypatched genai client), once against ClaudeProvider
 (monkeypatched) — feeding both the same model JSON, and assert the resulting
 audit_runs rows and report messages match. The Phase 4 analog of
 tests/test_agent_provider_parity.py.
@@ -16,18 +16,15 @@ from datetime import date
 from decimal import Decimal
 from types import SimpleNamespace
 
-import respx
-from httpx import Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.audit import run_monthly_audit
 from app.db import Base
 from app.llm.claude import ClaudeProvider
-from app.llm.ollama import OllamaProvider
+from app.llm.gemini import GeminiProvider
 from app.models import AuditRun, Expense, Income, User
 
-OLLAMA_URL = "http://localhost:11434/api/chat"
 TODAY = date(2026, 8, 15)
 
 
@@ -61,15 +58,18 @@ def _report_json() -> str:
     )
 
 
-@respx.mock
 async def test_audit_produces_identical_writes_across_providers(tmp_path, monkeypatch):
     report_json = _report_json()
 
-    ollama_engine, ollama_session = await _fresh_session(tmp_path, "ollama")
-    ollama_user = await _seed(ollama_session)
-    respx.post(OLLAMA_URL).mock(return_value=Response(200, json={"message": {"content": report_json}}))
-    ollama_provider = OllamaProvider(base_url="http://localhost:11434", model="qwen2.5:7b")
-    ollama_result = await run_monthly_audit(ollama_session, ollama_provider, ollama_user.id, today=TODAY)
+    gemini_engine, gemini_session = await _fresh_session(tmp_path, "gemini")
+    gemini_user = await _seed(gemini_session)
+
+    async def fake_generate(**kwargs):
+        return SimpleNamespace(text=report_json)
+
+    gemini_provider = GeminiProvider(api_key="test-key", model="gemini-3.5-flash-lite")
+    monkeypatch.setattr(gemini_provider._client.aio.models, "generate_content", fake_generate)
+    gemini_result = await run_monthly_audit(gemini_session, gemini_provider, gemini_user.id, today=TODAY)
 
     claude_engine, claude_session = await _fresh_session(tmp_path, "claude")
     claude_user = await _seed(claude_session)
@@ -81,18 +81,18 @@ async def test_audit_produces_identical_writes_across_providers(tmp_path, monkey
     monkeypatch.setattr(claude_provider._client.messages, "create", fake_create)
     claude_result = await run_monthly_audit(claude_session, claude_provider, claude_user.id, today=TODAY)
 
-    assert ollama_result.status == claude_result.status == "completed"
-    assert ollama_result.message == claude_result.message
+    assert gemini_result.status == claude_result.status == "completed"
+    assert gemini_result.message == claude_result.message
 
-    ollama_run = (await ollama_session.execute(select(AuditRun))).scalar_one()
+    gemini_run = (await gemini_session.execute(select(AuditRun))).scalar_one()
     claude_run = (await claude_session.execute(select(AuditRun))).scalar_one()
-    assert ollama_run.total_income == claude_run.total_income == Decimal("50000")
-    assert ollama_run.total_spend == claude_run.total_spend == Decimal("38000")
-    assert ollama_run.net_saved == claude_run.net_saved == Decimal("12000")
-    assert ollama_run.savings_rate == claude_run.savings_rate
-    assert ollama_run.summary == claude_run.summary
+    assert gemini_run.total_income == claude_run.total_income == Decimal("50000")
+    assert gemini_run.total_spend == claude_run.total_spend == Decimal("38000")
+    assert gemini_run.net_saved == claude_run.net_saved == Decimal("12000")
+    assert gemini_run.savings_rate == claude_run.savings_rate
+    assert gemini_run.summary == claude_run.summary
 
-    await ollama_session.close()
+    await gemini_session.close()
     await claude_session.close()
-    await ollama_engine.dispose()
+    await gemini_engine.dispose()
     await claude_engine.dispose()

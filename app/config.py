@@ -35,11 +35,12 @@ class Settings(BaseSettings):
     )
 
     # --- LLM provider -----------------------------------------------------
-    llm_provider: Literal["ollama", "claude", "gemini"] = "ollama"
-    llm_model: str = "qwen2.5vl:7b"
+    # Gemini 3.5 Flash-Lite for both local development and production (see
+    # docs/AGENT_DESIGN.md §6). Claude is kept only to compare in the evals.
+    llm_provider: Literal["gemini", "claude"] = "gemini"
+    llm_model: str = "gemini-3.5-flash-lite"
     anthropic_api_key: str | None = None
     gemini_api_key: str | None = None
-    ollama_base_url: str = "http://localhost:11434"
 
     # --- Agent behaviour --------------------------------------------------
     confidence_threshold: float = 0.75
@@ -50,6 +51,15 @@ class Settings(BaseSettings):
     # duplicate-charge guard; see CLAUDE.md's note on confidence_threshold vs.
     # _LLM_FALLBACK_THRESHOLD for the same "shared value, different knob" shape.
     duplicate_charge_window_days: int = 2
+
+    # --- Tool-using agent (app/agent_core/) --------------------------------
+    # "agent" = the tool-using agent decides each transaction (with the
+    # policy layer checking every write); "pipeline" = the original fixed
+    # decide_match flow. Both are kept so the evals can compare them.
+    reconcile_engine: Literal["agent", "pipeline"] = "agent"
+    agent_max_steps: int = 8  # model calls per run before it is stopped
+    agent_max_tokens_per_run: int = 40_000
+    agent_max_runs_per_day: int = 200  # per user — a cost safety net
 
     # --- Salary audit (Phase 4) -------------------------------------------
     # How close a credit must be to the profile's expected_salary to count as

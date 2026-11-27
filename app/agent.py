@@ -37,7 +37,7 @@ _MAX_CANDIDATES = 3
 _user_locks: dict[UUID, asyncio.Lock] = {}
 
 
-def _lock_for(user_id: UUID) -> asyncio.Lock:
+def lock_for(user_id: UUID) -> asyncio.Lock:
     if user_id not in _user_locks:
         _user_locks[user_id] = asyncio.Lock()
     return _user_locks[user_id]
@@ -80,7 +80,7 @@ class RunSummary:
         return ", ".join(parts)
 
 
-def _transaction_to_dict(txn: Transaction) -> dict:
+def transaction_to_dict(txn: Transaction) -> dict:
     return {
         "amount": str(txn.amount),
         "merchant": redact(txn.merchant) if txn.merchant else None,
@@ -90,7 +90,7 @@ def _transaction_to_dict(txn: Transaction) -> dict:
     }
 
 
-def _expense_to_dict(expense: Expense) -> dict:
+def expense_to_dict(expense: Expense) -> dict:
     return {
         "id": str(expense.id),
         "amount": str(expense.amount),
@@ -101,7 +101,7 @@ def _expense_to_dict(expense: Expense) -> dict:
     }
 
 
-async def _find_candidates(session: AsyncSession, user_id: UUID, txn: Transaction) -> list[Expense]:
+async def find_candidates(session: AsyncSession, user_id: UUID, txn: Transaction) -> list[Expense]:
     """Up to 3 not-yet-linked expenses within an amount/date window, closest
     first. Excluding already-linked expenses is what stops one expense
     absorbing two transactions."""
@@ -130,9 +130,9 @@ async def _find_candidates(session: AsyncSession, user_id: UUID, txn: Transactio
     return candidates[:_MAX_CANDIDATES]
 
 
-async def _find_recent_duplicate_expense(session: AsyncSession, user_id: UUID, txn: Transaction) -> Expense | None:
+async def find_recent_duplicate_expense(session: AsyncSession, user_id: UUID, txn: Transaction) -> Expense | None:
     """Same merchant + same amount within duplicate_charge_window_days of an
-    EXISTING expense — unlike _find_candidates, this checks every expense
+    EXISTING expense — unlike find_candidates, this checks every expense
     (not just unlinked ones), since a duplicate SMS for something already
     logged is still a duplicate. Only meaningful when txn.merchant is set;
     callers must not call this for a merchant-less transaction."""
@@ -264,7 +264,7 @@ def _normalize_auto_log_category(decision: MatchDecision) -> MatchDecision:
     )
 
 
-async def _act(
+async def act_on_decision(
     session: AsyncSession, user_id: UUID, txn: Transaction, decision: MatchDecision
 ) -> PendingQuestion | None:
     now = datetime.now(UTC)
@@ -324,7 +324,7 @@ async def reconcile_user(session: AsyncSession, provider: LLMProvider, user_id: 
     pending transaction for one user. A single transaction's LLM failure is
     recorded and skipped rather than aborting the whole run. Only one run per
     user at a time (see _user_locks)."""
-    async with _lock_for(user_id):
+    async with lock_for(user_id):
         return await _reconcile_user_locked(session, provider, user_id)
 
 
@@ -356,8 +356,8 @@ async def _reconcile_user_locked(session: AsyncSession, provider: LLMProvider, u
     logger.info("reconcile_user: user=%s — %d pending transaction(s)", user_id, len(transactions))
 
     for txn in transactions:
-        candidates = await _find_candidates(session, user_id, txn)
-        candidate_dicts = [_expense_to_dict(expense) for expense in candidates]
+        candidates = await find_candidates(session, user_id, txn)
+        candidate_dicts = [expense_to_dict(expense) for expense in candidates]
         candidate_ids = {c["id"] for c in candidate_dicts}
 
         remembered_category = None
@@ -378,22 +378,22 @@ async def _reconcile_user_locked(session: AsyncSession, provider: LLMProvider, u
                 confidence=1.0,
                 reasoning=f"Remembered category for merchant '{txn.merchant}' from a previous manual choice.",
             )
-            duplicate = await _find_recent_duplicate_expense(session, user_id, txn)
+            duplicate = await find_recent_duplicate_expense(session, user_id, txn)
             decision = _apply_duplicate_guard(decision, duplicate)
         else:
             try:
-                decision = await provider.decide_match(_transaction_to_dict(txn), candidate_dicts)
+                decision = await provider.decide_match(transaction_to_dict(txn), candidate_dicts)
             except LLMDecisionError as exc:
                 logger.warning("txn=%s: provider error, skipping (%s)", txn.id, exc)
                 summary.errors += 1
                 continue
 
-            duplicate = await _find_recent_duplicate_expense(session, user_id, txn) if txn.merchant else None
+            duplicate = await find_recent_duplicate_expense(session, user_id, txn) if txn.merchant else None
             decision = _apply_guard(decision, candidate_ids, txn)
             decision = _apply_duplicate_guard(decision, duplicate)
             decision = _apply_category_hint(decision, txn)
             decision = _normalize_auto_log_category(decision)
-        pending = await _act(session, user_id, txn, decision)
+        pending = await act_on_decision(session, user_id, txn, decision)
         logger.info(
             "txn=%s: decision=%s confidence=%.2f candidates=%d",
             txn.id,
