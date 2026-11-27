@@ -19,6 +19,15 @@ savings with LLM-written recommendations, asks about anomalies, and — mid-mont
 deterministically — warns about a late salary or a too-high spending pace. See
 "The salary audit is a second agent loop" below.
 
+The v2 redesign (`docs/AGENT_DESIGN.md`) turns this into a **tool-using
+agent**: `app/agent_core/` (tools + a policy layer that checks every write +
+a hand-written loop + traces in `agent_runs`/`agent_steps`) now decides each
+transaction (`RECONCILE_ENGINE=agent`, the original pipeline is kept as
+`pipeline` for comparison), answers free-form chat with Yes/No-confirmed
+changes, and tracks a **varying-savings month** (`app/savings.py`,
+`app/month_plan.py`). `evals/` measures all of it. See "The tool-using agent"
+and "Savings are measured, never assumed" below.
+
 ## Commands
 
 ```bash
@@ -28,7 +37,7 @@ pip install -r requirements-dev.txt   # requirements.txt + test deps
 alembic upgrade head                  # apply migrations (reads DATABASE_URL from .env)
 
 # Tests — all offline (mocked HTTP/API, aiosqlite for DB tests), no live
-# Ollama/Telegram/Neon connection required
+# Gemini/Telegram/Neon connection required
 pytest
 pytest tests/test_agent.py                                    # one file
 pytest tests/test_agent.py::test_auto_link_links_expense_and_marks_transaction_processed  # one test
@@ -41,10 +50,31 @@ uvicorn app.main:app --reload --host 127.0.0.1 --port "${PORT:-7001}"
 
 # Sanity-check the LLMProvider abstraction against a real model (not mocks)
 python -m scripts.try_decide           # uses LLM_PROVIDER from .env
-python -m scripts.try_decide --both    # Ollama + Claude side by side (needs ANTHROPIC_API_KEY)
+python -m scripts.try_decide --both    # Gemini + Claude side by side (needs ANTHROPIC_API_KEY)
+
+# Evals (see evals/README.md) — offline with --provider none, real with gemini/claude
+python -m evals.run --suite parser --provider none
+python -m evals.run --suite reconcile --provider gemini --engine agent
+
+# Real-Postgres smoke test (CI runs it after alembic upgrade/downgrade/check)
+python -m scripts.postgres_smoke
 ```
 
+CI (`.github/workflows/ci.yml`) runs on every push to any branch: lint +
+mypy, pytest with an 85% coverage floor, offline evals with
+`--fail-on-unsafe`, migrations + `alembic check` + the smoke test on a
+Postgres 16 service, and a Docker build. Live Gemini evals are a separate
+manual workflow (`live-evals.yml`) so they never show up as skipped checks
+on a PR. Keep new checks fast and offline.
+
 ## Code standards
+
+**Keep code beginner-simple** (the owner's standing rule — see
+`docs/AGENT_DESIGN.md` §2): plain functions and simple `for`/`if` over clever
+abstractions, small well-named functions, no metaprogramming or registration
+magic, and every money rule as plain Python with a unit test. Good engineering
+still applies (types, tests, ruff/mypy clean).
+
 
 Ruff (lint + format) and mypy are configured in `pyproject.toml`:
 
@@ -86,42 +116,39 @@ lifespan (Telegram `Application` startup/shutdown) + `include_router`.
 
 ### The provider boundary is load-bearing
 
-`app/agent.py` and `app/parser.py` import only `app.llm.base` (the
-`LLMProvider` Protocol + `LLMDecisionError`) and `app.schemas` — never
-`anthropic`, `httpx`, or `google-genai` directly, and never
-`app.llm.ollama` / `app.llm.claude` / `app.llm.gemini`.
+`app/agent.py`, `app/parser.py` and `app/agent_core/` import only
+`app.llm.base` (the `LLMProvider` Protocol, `LLMDecisionError`, and the
+provider-neutral tool-calling types `ToolSpec`/`ToolCall`/`AssistantTurn`/
+`ChatMessage`) and `app.schemas` — never `anthropic` or `google-genai`
+directly, and never `app.llm.claude` / `app.llm.gemini`.
 `app.llm.factory.get_provider()` is the only place that picks a concrete
-implementation, based on `settings.llm_provider`. Three interchangeable
-providers exist — Ollama (free, local, dev default), Claude (paid, cloud),
-Gemini (free tier, cloud — the recommended option for a deployment that
-needs to run somewhere other than your own laptop; use `-latest` model
-aliases like `gemini-flash-lite-latest` rather than a pinned dated version,
-since Google retires those for new API keys) — and this boundary is what
-makes the swap safe and keeps `tests/test_agent.py` and
-`tests/test_parser.py` provider-agnostic (they drive a scripted
-`FakeProvider` instead). All three real providers are constrained to the
-*same* JSON Schema (generated from `app.schemas`, sanitized via
-`sanitize_schema_for_llm` to strip keywords like `minimum`/`maximum` that
-structured-output modes don't reliably support) and return the same
+implementation, based on `settings.llm_provider`. Two providers exist:
+**Gemini 3.5 Flash-Lite** (`gemini-3.5-flash-lite`, the default for *both*
+local development and production — Ollama was removed in the v2 redesign) and
+Claude (kept only to compare against in the evals). Both are constrained to
+the *same* JSON Schema for the structured-output methods (generated from
+`app.schemas`, sanitized via `sanitize_schema_for_llm`) and return the same
 Pydantic model — `tests/test_llm_providers.py`,
-`tests/test_agent_provider_parity.py`, and `tests/test_audit_provider_parity.py`
-assert byte-for-byte equal output across all three providers given
-identical mocked model responses, for every `LLMProvider` method
-(`decide_match`, `parse_transaction`, `extract_receipt`, `interpret_query`,
-`audit_finances`).
+`tests/test_agent_provider_parity.py` and `tests/test_audit_provider_parity.py`
+assert equal output across both given identical mocked responses. For tool
+calling (`chat_with_tools`), each provider converts our own message types to
+its SDK format; Gemini's reply `Content` is sent back unchanged on the next
+turn (`AssistantTurn.raw`) because Gemini 3.x attaches thought signatures that
+must be returned as-is. Every SDK/network error must surface as
+`LLMDecisionError` — callers never handle vendor exceptions.
 
 ### The decision loop enforces its own conservatism — it doesn't trust the prompt
 
 `app/agent.py:reconcile_user()` is perceive (load pending transactions) →
-compare (`_find_candidates`, up to 3 unlinked expenses within
+compare (`find_candidates`, up to 3 unlinked expenses within
 `candidate_amount_tolerance_pct`/`candidate_date_window_days`) → decide
-(`provider.decide_match`) → act (`_act`). The system prompt tells the model
+(`provider.decide_match`) → act (`act_on_decision`). The system prompt tells the model
 to be conservative, but `_apply_guard()` re-checks this in code: any
 `auto_link`/`auto_log` decision with `confidence < settings.confidence_threshold`,
 or an `auto_link` naming a `matched_expense_id` that wasn't actually in the
 candidates offered (treated as a hallucination), gets rewritten to
 `ask_user` regardless of what the model said. This matters because the dev
-model (a local 7B) will not reliably obey a prompt-only rule. Commits happen
+model will not reliably obey a prompt-only rule. Commits happen
 per-transaction (not per-batch) so one bad decision/exception can't roll
 back the rest of a run — `reconcile_user` catches `LLMDecisionError` per
 transaction and keeps going, counting it in `RunSummary.errors`.
@@ -138,7 +165,7 @@ a different check entirely.
 `reconcile_user`'s per-transaction body is actually two branches, not one
 straight decide→guard pipeline:
 
-- **Merchant-memory short-circuit.** If there are no `_find_candidates`
+- **Merchant-memory short-circuit.** If there are no `find_candidates`
   results, no `txn.category_hint`, and `app.merchant_memory.recall_merchant_category`
   finds a remembered category for `txn.merchant` (learned from a past
   `ask_user` answer — see `app/expenses.py:resolve_ask_user_answer` below),
@@ -163,7 +190,7 @@ straight decide→guard pipeline:
 `_apply_guard` branch) that runs in both branches above: it downgrades
 `auto_link`/`auto_log` to `ask_user`, regardless of confidence, whenever
 `_find_recent_duplicate_expense` finds an **existing** expense (linked or
-not — unlike `_find_candidates`, which only ever offers unlinked ones) with
+not — unlike `find_candidates`, which only ever offers unlinked ones) with
 the same merchant and amount within `duplicate_charge_window_days`. A
 same-merchant, same-amount repeat is often a double-debit, not two separate
 purchases; this is a deliberate friction cost on legitimate same-day repeat
@@ -224,7 +251,74 @@ actual income/spend against. Both `run_audit_all_users` (monthly) and
 the `/run-audit` and `/check-salary-alerts` endpoints — same fail-closed
 `CRON_SECRET` gate and 202-background-task shape as `/reconcile`/`/check-budgets`.
 
-### `Savings` is a category, not a ledger — one flag, four call sites
+### The tool-using agent (`app/agent_core/`)
+
+The v2 engine. Same conservatism as `reconcile_user`, enforced the same way —
+in code, not in the prompt:
+
+- `tools.py` / `chat_tools.py`: each tool is a Pydantic args model + a plain
+  async function + `kind` (`read` runs freely, `write` goes through the
+  policy). Reconcile tools always act on `ctx.transaction` — the model never
+  passes a transaction id.
+- `policy.py`: `check(tool_name, args, ctx) -> allow | ask | deny`. Reconcile
+  writes re-implement `_apply_guard`/`_apply_duplicate_guard` (ids must have
+  been *shown* via `find_matching_expenses` → `ctx.seen_expense_ids`, known
+  categories only, never `Savings` unless captioned, confidence threshold,
+  duplicate charge, caption-less photo, one decision per transaction). Chat
+  writes are validated and then **always** `ask`: they become a
+  `PendingAction` with Yes/No buttons and only run (in plain code,
+  `actions.py`) after the user taps Yes.
+- `loop.py`: model → tool calls → policy → results → repeat, with
+  `agent_max_steps`, `agent_max_tokens_per_run` and a per-user
+  `agent_max_runs_per_day`. It never raises: tool errors go back to the model,
+  any model error ends the run as `failed`. Every step is saved to
+  `agent_steps`.
+- `reconcile.py`: per transaction — the merchant-memory shortcut first (no
+  LLM), else the agent, else a safe `ask_user` fallback. A model failure
+  leaves the transaction `pending` (retried next run). It reuses
+  `app/agent.py`'s `act_on_decision`, so both engines write identical rows.
+- `chat.py`: any text that isn't a bank SMS (`parser.looks_like_bank_sms`)
+  and `/ask` go here, with the last 10 `conversation_messages` as context.
+
+Bump `prompts.PROMPT_VERSION` whenever a prompt changes — it's stored on
+every `agent_runs` row so traces and eval results stay comparable.
+
+### Savings are measured, never assumed
+
+The user saves a different amount every month, so nothing assumes a
+percentage. `own_accounts` holds the last 4 digits of the user's savings
+account (`/myaccount savings 4321`). `app/savings.py:account_direction` finds
+that number in the SMS and reads the nearest preposition before it: a debit
+*to* it is a savings transfer (filed as a `Savings` expense by
+`app/ingestion.py`, never by the model); a credit *from* it is an income of
+kind `savings_withdrawal`, which is **not income** — every income total
+filters it out via `app/income.py:COUNTS_AS_INCOME` (grep it, and
+`SAVINGS_WITHDRAWAL`, before touching any income sum). `app/month_plan.py`
+computes `spending_money = salary + other income − moved to savings + taken
+back` and `money_left`, and the deduped money alerts (`half_used`,
+`running_low`, `ran_out`, `fast_pace`). The budget month starts on the salary profile's payday
+(`plan_period`), not the 1st. The savings bank's *own* SMS for a move between
+your accounts (money arriving in savings, or leaving it for another account)
+is skipped (`is_savings_side_of_a_transfer`) — the move is counted from the
+main account's SMS, and counting both sides would double it. A debit from
+savings is only skipped when it goes to the user's registered *main* account
+(`/myaccount main 1234`); paying anyone else from savings is real spending.
+Merchant memory: only an exact / same-words match (`recall_merchant_category`)
+may log without asking; a looser fuzzy match (`suggest_merchant_category`) is
+passed to the agent as a hint only — similar names can be different people.
+
+Text messages are routed by plain code before any LLM call:
+`parser.looks_like_bank_sms` needs an account/UPI/card marker plus an amount
+and must not start like a person writes ("did", "how", "I", "my", ...).
+Anything else goes to the chat agent. Getting this wrong turns a question
+like "did my salary of Rs 50000 get credited?" into an income row.
+
+Inline-button answers (`resolve_ask_user_answer`, `resolve_pending_action`)
+claim their row with one conditional `UPDATE ... WHERE status = 'open'/'waiting'`
+and act only if exactly one row changed — webhook updates run concurrently,
+so a double tap must not apply twice.
+
+### `Savings` is a category, not a ledger — one flag, several call sites
 
 `app/categories.py:SAVINGS_CATEGORY`/`is_savings_category()` mark money moved
 to another account (e.g. your own savings account) as *not actually spent* —

@@ -55,7 +55,7 @@ async def test_answering_an_open_question_creates_expense_and_resolves_run(db_se
     user = await _make_user(db_session)
     run = await _make_pending_run(db_session, user)
 
-    expense = await resolve_ask_user_answer(db_session, run.id, "Food")
+    expense = await resolve_ask_user_answer(db_session, run.id, "Food", user_id=run.user_id)
 
     assert expense is not None
     assert expense.category == "Food"
@@ -75,13 +75,13 @@ async def test_double_tap_on_already_resolved_run_returns_none(db_session):
     user = await _make_user(db_session)
     run = await _make_pending_run(db_session, user, status="resolved")
 
-    expense = await resolve_ask_user_answer(db_session, run.id, "Food")
+    expense = await resolve_ask_user_answer(db_session, run.id, "Food", user_id=run.user_id)
 
     assert expense is None
 
 
 async def test_unknown_run_id_returns_none(db_session):
-    expense = await resolve_ask_user_answer(db_session, uuid4(), "Food")
+    expense = await resolve_ask_user_answer(db_session, uuid4(), "Food", user_id=uuid4())
 
     assert expense is None
 
@@ -92,7 +92,7 @@ async def test_recategorize_expense_updates_category(db_session):
     db_session.add(expense)
     await db_session.commit()
 
-    updated = await recategorize_expense(db_session, expense.id, "Shopping")
+    updated = await recategorize_expense(db_session, expense.id, "Shopping", user_id=expense.user_id)
 
     assert updated is not None
     assert updated.category == "Shopping"
@@ -101,14 +101,14 @@ async def test_recategorize_expense_updates_category(db_session):
 
 
 async def test_recategorize_missing_expense_returns_none(db_session):
-    assert await recategorize_expense(db_session, uuid4(), "Food") is None
+    assert await recategorize_expense(db_session, uuid4(), "Food", user_id=uuid4()) is None
 
 
 async def test_resolving_ask_user_remembers_the_merchant_category(db_session):
     user = await _make_user(db_session)
     run = await _make_pending_run(db_session, user)
 
-    await resolve_ask_user_answer(db_session, run.id, "Food")
+    await resolve_ask_user_answer(db_session, run.id, "Food", user_id=run.user_id)
 
     memory = (
         await db_session.execute(select(MerchantCategory).where(MerchantCategory.user_id == user.id))
@@ -123,10 +123,10 @@ async def test_resolving_a_second_question_for_the_same_merchant_updates_the_mem
     and resolve_ask_user_answer's upsert must respect it."""
     user = await _make_user(db_session)
     first_run = await _make_pending_run(db_session, user)
-    await resolve_ask_user_answer(db_session, first_run.id, "Food")
+    await resolve_ask_user_answer(db_session, first_run.id, "Food", user_id=first_run.user_id)
 
     second_run = await _make_pending_run(db_session, user)
-    await resolve_ask_user_answer(db_session, second_run.id, "Shopping")
+    await resolve_ask_user_answer(db_session, second_run.id, "Shopping", user_id=second_run.user_id)
 
     stmt = select(MerchantCategory).where(MerchantCategory.user_id == user.id)
     rows = (await db_session.execute(stmt)).scalars().all()
@@ -158,6 +158,6 @@ async def test_resolving_ask_user_with_no_merchant_does_not_write_memory(db_sess
     db_session.add(run)
     await db_session.commit()
 
-    await resolve_ask_user_answer(db_session, run.id, "Food")
+    await resolve_ask_user_answer(db_session, run.id, "Food", user_id=run.user_id)
 
     assert (await db_session.execute(select(MerchantCategory))).scalars().all() == []

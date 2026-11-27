@@ -19,6 +19,8 @@ from decimal import Decimal, InvalidOperation
 from typing import Literal
 
 from app.llm.base import LLMDecisionError, LLMProvider
+from app.privacy import redact
+from app.timeutil import local_today
 
 logger = logging.getLogger(__name__)
 
@@ -29,11 +31,34 @@ logger = logging.getLogger(__name__)
 _LLM_FALLBACK_THRESHOLD = 0.75
 
 _AMOUNT_RE = re.compile(
-    r"(?:INR|Rs\.?|₹)\s*([\d,]+(?:\.\d{1,2})?)|\b([\d,]+(?:\.\d{1,2})?)\s*(?:INR|Rs\.?|₹)\b",
+    # \d[\d,]* (not [\d,]+) so a lone comma — "Dear Customer, INR 500" —
+    # is never read as an amount.
+    r"(?:INR|Rs\.?|₹)\s*(\d[\d,]*(?:\.\d{1,2})?)|\b(\d[\d,]*(?:\.\d{1,2})?)\s*(?:INR|Rs\.?|₹)\b",
     re.IGNORECASE,
 )
-_DEBIT_RE = re.compile(r"\b(?:debited|debit|spent|paid|withdrawn|purchase|sent|transferred)\b", re.IGNORECASE)
-_CREDIT_RE = re.compile(r"\b(?:credited|credit|received|refunded|deposited)\b", re.IGNORECASE)
+# "credit card" / "debit card" name a card, not a direction — the
+# (?!\s*card) part stops "your credit card bill" from reading as money in.
+_DEBIT_RE = re.compile(
+    r"\b(?:debited|debit(?!\s*card)|spent|paid|withdrawn|purchase|sent|transferred)\b", re.IGNORECASE
+)
+_CREDIT_RE = re.compile(r"\b(?:credited|credit(?!\s*card)|received|refunded|deposited)\b", re.IGNORECASE)
+
+# Words that come right before an account *balance* or *limit* figure. An
+# amount right after one of these is not the transaction amount — e.g.
+# "Avl Bal Rs.12,000. Rs.500 debited" must give 500, not 12,000.
+_BALANCE_WORDS_RE = re.compile(r"(?:bal|balance|limit|lmt)(?:\s+(?:is|of))?\W{0,3}$", re.IGNORECASE)
+
+# OTP / verification-code messages. Many real alerts end with a safety
+# footer like "Never share your OTP" — so an OTP word only rejects the
+# message when no money actually moved (see is_not_a_transaction).
+_OTP_RE = re.compile(r"\b(?:otp|one[\s-]time[\s-]password|verification code)\b", re.IGNORECASE)
+# Words that mean money already moved.
+_COMPLETED_RE = re.compile(
+    r"\b(?:debited|credited|spent|paid|withdrawn|sent|received|refunded|deposited|transferred)\b",
+    re.IGNORECASE,
+)
+# A future/scheduled debit (mandate, autopay reminder) hasn't happened yet.
+_FUTURE_RE = re.compile(r"\bwill be (?:debited|credited|deducted)\b", re.IGNORECASE)
 
 _MONTHS = {
     "jan": 1,
@@ -97,22 +122,81 @@ class ParsedTransaction:
 
 
 def _parse_amount(text: str) -> Decimal | None:
-    match = _AMOUNT_RE.search(text)
-    if not match:
-        return None
-    raw = (match.group(1) or match.group(2)).replace(",", "")
-    try:
-        return Decimal(raw).quantize(Decimal("0.01"))
-    except InvalidOperation:
-        return None
+    """The first amount in the text that is not a balance/limit figure."""
+    for match in _AMOUNT_RE.finditer(text):
+        text_before = text[max(0, match.start() - 20) : match.start()]
+        if _BALANCE_WORDS_RE.search(text_before.strip()):
+            continue  # e.g. "Avl Bal Rs.12,000" — skip it
+        raw = (match.group(1) or match.group(2)).replace(",", "")
+        try:
+            return Decimal(raw).quantize(Decimal("0.01"))
+        except InvalidOperation:
+            continue  # not a usable number — try the next amount
+    return None
 
 
 def _parse_direction(text: str) -> bool | None:
-    if _DEBIT_RE.search(text):
+    """True for money out, False for money in, None if unclear.
+
+    When both kinds of words appear, the one that comes FIRST wins. Bank SMS
+    lead with what happened to *your* account: "credited with Rs.5000 ...
+    transferred from RAHUL" is a credit, "debited ... and credited to SWIGGY"
+    is a debit."""
+    debit_match = _DEBIT_RE.search(text)
+    credit_match = _CREDIT_RE.search(text)
+    if debit_match and credit_match:
+        return debit_match.start() < credit_match.start()
+    if debit_match:
         return True
-    if _CREDIT_RE.search(text):
+    if credit_match:
         return False
     return None
+
+
+# Things only a bank/UPI message contains: an account, card or UPI reference.
+_BANK_MARKER_RE = re.compile(
+    r"\b(?:a/c|acct|account|upi|vpa|neft|imps|rtgs|ref(?:no)?|avl|card|bank|txn)\b|[xX*]{2,}\d{3,}",
+    re.IGNORECASE,
+)
+# "debited by 20.0" — SBI writes amounts with no Rs/INR in front.
+_BARE_AMOUNT_RE = re.compile(r"\b(?:debited|credited)\b\W+(?:by|for|with)?\s*\d", re.IGNORECASE)
+_ACCOUNT_MASK_RE = re.compile(r"[xX*]+\d{3,}")
+# How a person (not a bank) starts a message: a question, or "I ..." / "my ...".
+_PERSON_START_RE = re.compile(
+    r"^\s*(?:how|what|why|when|where|which|who|did|does|do|is|are|was|can|could|should|will|would|"
+    r"please|pls|log|set|show|tell|i|i'm|im|my|me)\b",
+    re.IGNORECASE,
+)
+
+
+def looks_like_bank_sms(text: str) -> bool:
+    """Route a Telegram text message, without an LLM: True for a forwarded
+    bank/UPI SMS, False for a chat message to the agent.
+
+    A bank SMS mentions an account/UPI/card AND an amount, and doesn't start
+    the way a person writes ("did my salary of Rs 50000 get credited?" is a
+    question, not an SMS)."""
+    if _PERSON_START_RE.search(text):
+        return False
+    if not _BANK_MARKER_RE.search(text):
+        return False
+    # A bare number ("credited 50000") only counts next to a masked account
+    # number (XX1234) — a person typing "salary credited 50000 in my
+    # account" never writes one.
+    has_bare_amount = _BARE_AMOUNT_RE.search(text) is not None and _ACCOUNT_MASK_RE.search(text) is not None
+    has_amount = _parse_amount(text) is not None or has_bare_amount
+    return has_amount or is_not_a_transaction(text)
+
+
+def is_not_a_transaction(text: str) -> bool:
+    """Messages that mention an amount but are never a completed transaction:
+    reminders about money that will move later, and OTP messages (unless
+    money actually moved — then the OTP word is just a safety footer)."""
+    if _FUTURE_RE.search(text):
+        return True
+    if _OTP_RE.search(text) and not _COMPLETED_RE.search(text):
+        return True
+    return False
 
 
 def _parse_date(text: str) -> date | None:
@@ -165,7 +249,7 @@ def _regex_result(
     return ParsedTransaction(
         amount=amount,
         merchant=merchant,
-        txn_date=txn_date or date.today(),
+        txn_date=txn_date or local_today(),
         is_debit=is_debit if is_debit is not None else True,
         confidence=confidence,
         method="regex",
@@ -179,6 +263,10 @@ async def parse_sms(raw_text: str, provider: LLMProvider) -> ParsedTransaction:
     locate a transaction amount at all — i.e. the text likely isn't a
     transaction alert.
     """
+    if is_not_a_transaction(raw_text):
+        logger.info("message looks like an OTP/verification message — not a transaction")
+        raise ParseError("This looks like an OTP or verification message, not a transaction.")
+
     amount = _parse_amount(raw_text)
     is_debit = _parse_direction(raw_text)
     txn_date = _parse_date(raw_text)
@@ -194,8 +282,9 @@ async def parse_sms(raw_text: str, provider: LLMProvider) -> ParsedTransaction:
 
     # confidence can only reach the threshold if amount contributed (0.5),
     # since date+merchant alone cap out at 0.5 — so amount is guaranteed set
-    # here.
-    if confidence >= _LLM_FALLBACK_THRESHOLD:
+    # here. The direction must also be known: guessing "debit" for a message
+    # with no debit/credit word is how non-transactions slipped through.
+    if confidence >= _LLM_FALLBACK_THRESHOLD and is_debit is not None:
         assert amount is not None
         logger.info(
             "parsed via regex (confidence=%.2f): amount=%s merchant=%r txn_date=%s is_debit=%s",
@@ -219,9 +308,9 @@ async def parse_sms(raw_text: str, provider: LLMProvider) -> ParsedTransaction:
         _LLM_FALLBACK_THRESHOLD,
     )
     try:
-        extraction = await provider.parse_transaction(raw_text)
+        extraction = await provider.parse_transaction(redact(raw_text))
     except LLMDecisionError as exc:
-        if amount is not None:
+        if amount is not None and is_debit is not None:
             # Regex found a usable amount even though overall confidence was
             # low (e.g. missing date/merchant); better to log an
             # approximate expense than drop it because the LLM fallback
@@ -243,6 +332,11 @@ async def parse_sms(raw_text: str, provider: LLMProvider) -> ParsedTransaction:
     if not extraction.is_transaction or extraction.amount is None:
         logger.info("llm fallback: not a transaction (%r)", raw_text[:40])
         raise ParseError("This message doesn't look like a bank/UPI transaction alert.")
+    if extraction.is_debit is None:
+        # Never guess whether money came in or went out — a wrong guess turns
+        # income into spend or the other way round.
+        logger.info("llm fallback: direction unknown (%r)", raw_text[:40])
+        raise ParseError("I couldn't tell whether money came in or went out.")
 
     logger.info(
         "parsed via llm: amount=%s merchant=%r txn_date=%s is_debit=%s",
@@ -254,8 +348,8 @@ async def parse_sms(raw_text: str, provider: LLMProvider) -> ParsedTransaction:
     return ParsedTransaction(
         amount=Decimal(str(extraction.amount)).quantize(Decimal("0.01")),
         merchant=extraction.merchant,
-        txn_date=extraction.txn_date or date.today(),
-        is_debit=extraction.is_debit if extraction.is_debit is not None else True,
+        txn_date=extraction.txn_date or local_today(),
+        is_debit=extraction.is_debit,
         confidence=1.0,
         method="llm",
     )

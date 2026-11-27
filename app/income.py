@@ -20,8 +20,15 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Income
+from app.savings import SAVINGS_WITHDRAWAL
+from app.timeutil import local_today
 
 logger = logging.getLogger(__name__)
+
+# Money taken back from your own savings account is not income. Every query
+# that totals income adds this filter (grep COUNTS_AS_INCOME / SAVINGS_WITHDRAWAL
+# before changing it — /income, /ask, the audit and the month plan must agree).
+COUNTS_AS_INCOME = Income.kind != SAVINGS_WITHDRAWAL
 
 
 async def record_income(
@@ -33,6 +40,7 @@ async def record_income(
     txn_date: date,
     raw_text: str,
     created_via: str = "auto",
+    kind: str = "other",
 ) -> Income:
     """Write a single money-in row. Mirrors app.expenses.log_manual_expense,
     but for the `incomes` ledger — no transaction/reconciliation behind it."""
@@ -43,6 +51,7 @@ async def record_income(
         txn_date=txn_date,
         raw_text=raw_text,
         created_via=created_via,
+        kind=kind,
     )
     session.add(income)
     await session.commit()
@@ -68,7 +77,7 @@ class IncomeSummary:
 
 
 async def _sum_between(session: AsyncSession, user_id: UUID, start: date | None, end: date | None) -> Decimal:
-    stmt = select(func.coalesce(func.sum(Income.amount), 0)).where(Income.user_id == user_id)
+    stmt = select(func.coalesce(func.sum(Income.amount), 0)).where(Income.user_id == user_id, COUNTS_AS_INCOME)
     if start is not None:
         stmt = stmt.where(Income.txn_date >= start)
     if end is not None:
@@ -81,7 +90,7 @@ async def get_income_summary(session: AsyncSession, user_id: UUID, *, today: dat
     """Income totals for the current month, the previous completed month, the
     current year, and all time. Takes an injectable `today` so tests can pin
     the clock (same convention as app/budgets.py and app/query.py)."""
-    today = today or date.today()
+    today = today or local_today()
     month_start = today.replace(day=1)
     last_month_end = month_start - timedelta(days=1)
     last_month_start = last_month_end.replace(day=1)

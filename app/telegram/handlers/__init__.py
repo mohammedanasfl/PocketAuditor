@@ -13,6 +13,7 @@ from __future__ import annotations
 from app.telegram.handlers.callbacks import (
     handle_audit_category_callback,
     handle_category_callback,
+    handle_pending_action_callback,
     send_ask_user_message,
     send_audit_question,
 )
@@ -23,6 +24,8 @@ from app.telegram.handlers.commands import (
     handle_help_command,
     handle_income_command,
     handle_log_command,
+    handle_myaccount_command,
+    handle_plan_command,
     handle_reconcile_command,
     handle_salary_command,
     handle_setbudget_command,
@@ -41,6 +44,9 @@ __all__ = [
     "handle_income_command",
     "handle_log_command",
     "handle_message",
+    "handle_myaccount_command",
+    "handle_pending_action_callback",
+    "handle_plan_command",
     "handle_photo_message",
     "handle_reconcile_command",
     "handle_salary_command",

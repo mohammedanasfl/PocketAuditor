@@ -11,10 +11,6 @@ from app.llm.base import LLMProvider
 
 
 def get_provider() -> LLMProvider:
-    if settings.llm_provider == "ollama":
-        from app.llm.ollama import OllamaProvider
-
-        return OllamaProvider()
     if settings.llm_provider == "claude":
         from app.llm.claude import ClaudeProvider
 

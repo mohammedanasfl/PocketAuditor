@@ -10,19 +10,21 @@ from decimal import Decimal, InvalidOperation
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from app.agent import reconcile_user
+from app.agent_core.reconcile import reconcile
 from app.audit import run_monthly_audit
 from app.budgets import format_budgets_message, get_budget_statuses, upsert_budget
 from app.categories import CATEGORIES, normalize_category
-from app.db import SessionLocal
+from app.db import SessionLocal, insert_once
 from app.expenses import log_manual_expense
 from app.income import get_income_summary
-from app.llm.base import LLMDecisionError
-from app.query import run_query
+from app.models import OwnAccount
+from app.month_plan import get_month_plan
 from app.reports import get_spend_summary
 from app.salary import format_salary_profile, get_salary_profile, upsert_salary_profile
+from app.savings import own_accounts
 from app.telegram.handlers._shared import _get_or_create_user
 from app.telegram.handlers.callbacks import send_ask_user_message, send_audit_question
+from app.telegram.handlers.messages import answer_chat_message
 
 logger = logging.getLogger(__name__)
 
@@ -33,19 +35,17 @@ _WELCOME_TEXT = (
     "don't have to check every transaction by hand.\n\n"
     "How it works:\n"
     "1️⃣ Forward me your bank/UPI SMS alerts as they arrive, or send a photo "
-    "of a bill/receipt/payment confirmation — I'll parse the amount, "
-    "merchant, and date from each one and hold onto it.\n"
-    "2️⃣ Run /reconcile whenever you're ready — I'll compare each pending "
-    "transaction against the expenses you've already logged.\n"
-    "3️⃣ For each one, I'll either:\n"
-    "   • auto-match it to an expense you already logged\n"
-    "   • log it as a new expense myself, if it's clear-cut\n"
-    "   • ask you to pick a category — only when I'm genuinely unsure\n\n"
-    "🆕 Salary audit: forward credit/salary SMS too — I track them as income, "
-    "separately from spend. Set /salary once, then /audit each month for an "
-    "AI-reviewed report on income vs. spend vs. savings — I'll ask about "
-    "anything unusual, and give you a heads-up mid-month if your salary is "
-    "late or you're spending faster than your savings target allows.\n\n"
+    "of a bill/receipt. I read the amount, merchant and date and handle it "
+    "right away:\n"
+    "   • match it to an expense you already logged\n"
+    "   • log it myself, if it's clear-cut\n"
+    "   • ask you to pick a category — only when I'm genuinely unsure\n"
+    "2️⃣ Salary and savings: forward your salary SMS and the SMS when you move "
+    "money to savings (any amount — it can change every month). Tell me your "
+    "savings account once with /myaccount. I'll show what's left to spend and "
+    "warn you before you run out.\n"
+    '3️⃣ Ask me anything in plain words: "how much did I spend on food this week?", '
+    '"how much is left?". I\'ll ask you to confirm before changing anything.\n\n'
     "Commands:\n"
     "/start — show this message\n"
     "/reconcile — reconcile your pending transactions\n"
@@ -58,8 +58,10 @@ _WELCOME_TEXT = (
     "no bank alert at all, e.g. /log Food 900 lunch\n"
     "/setbudget <category> <amount> — set a monthly limit, e.g. /setbudget Food 4000\n"
     "/budgets — see your limits and this month's spend per category\n"
-    "/ask <question> — ask about your spending, income, or balance, e.g. /ask how much "
-    "on food this week or /ask how much money do I have left this month\n\n"
+    "/plan — this month so far: salary, saved, spending money, money left\n"
+    "/myaccount savings <last 4 digits> — your own savings account, so transfers to it count as saving\n"
+    '/ask <question> — or just type it: "how much on food this week?", '
+    '"set my shopping budget to 3000" (I\'ll ask you to confirm any change)\n\n'
     "Forward your first SMS whenever you're ready."
 )
 
@@ -269,51 +271,66 @@ async def handle_budgets_command(update: Update, context: ContextTypes.DEFAULT_T
 
 
 async def handle_ask_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/ask <question> — a single, self-contained NL query over the user's
-    finances: spending, income, or overall balance (Phase 3b, widened by
-    Phase 4's aggregation="net" for "how much money do I have left"). Explicit
-    command rather than passive listening on every message, same reasoning as
-    the photo handler being opt-in via /reconcile rather than auto-triggered:
-    predictable behavior, and it keeps a forwarded SMS from ever being
-    misread as a question.
-
-    interpret_query only ever returns a QueryIntent — run_query (app/query.py)
-    is the one place that becomes a real, parameterized query; this handler
-    never sees or constructs SQL itself.
-    """
+    """/ask <question> — same as just typing the question: the chat agent
+    answers it with its tools (numbers always come from code, never the model)."""
     if update.message is None:
         return
-    chat_id = update.effective_chat.id
-    provider = context.bot_data["llm_provider"]
     question = " ".join(context.args or []).strip()
-    logger.info("chat=%s: /ask %r", chat_id, question)
-
     if not question:
-        await update.message.reply_text("Usage: /ask <question>\ne.g. /ask how much did I spend on food this week")
-        return
-
-    try:
-        intent = await provider.interpret_query(question)
-    except LLMDecisionError as exc:
-        logger.warning("chat=%s: interpret_query failed: %s", chat_id, exc)
         await update.message.reply_text(
-            "I couldn't understand that question — try phrasing it like 'how much on food this week?'"
+            "Just type your question, e.g. how much did I spend on food this week? (or /ask <question>)"
         )
         return
+    await answer_chat_message(update, context, question)
 
-    if not intent.is_financial_question:
-        logger.info("chat=%s: /ask question isn't about finances: %r", chat_id, question)
-        await update.message.reply_text(
-            "I can only answer questions about your spending, income, or balance — try something like "
-            "'how much did I spend on food this week?' or 'how much money do I have left this month?'"
-        )
+
+async def handle_plan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/plan — this month so far: salary, savings moved, spending money, money left."""
+    if update.message is None:
         return
+    async with SessionLocal() as session:
+        user = await _get_or_create_user(session, update.effective_chat.id)
+        plan = await get_month_plan(session, user.id)
+    await update.message.reply_text(plan.as_message())
+
+
+async def handle_myaccount_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/myaccount savings <last 4 digits> — remember your own savings account,
+    so transfers to it count as saving and money taken back isn't income.
+    With no arguments, lists the accounts already saved."""
+    if update.message is None:
+        return
+    args = context.args or []
+    usage = (
+        "Usage: /myaccount savings <last 4 digits> (your savings account)\n"
+        "or /myaccount main <last 4 digits> (the account your salary comes into)"
+    )
 
     async with SessionLocal() as session:
-        user = await _get_or_create_user(session, chat_id)
-        result = await run_query(session, user.id, intent)
+        user = await _get_or_create_user(session, update.effective_chat.id)
+        if not args:
+            savings = await own_accounts(session, user.id, "savings")
+            main = await own_accounts(session, user.id, "main")
+            listed = [f"savings XX{last4}" for last4 in savings] + [f"main XX{last4}" for last4 in main]
+            saved = ", ".join(listed) if listed else "none yet"
+            await update.message.reply_text(f"Your accounts: {saved}\n{usage}")
+            return
 
-    await update.message.reply_text(result.as_message())
+        kind = args[0].lower() if args else ""
+        if len(args) != 2 or kind not in ("savings", "main") or not (len(args[1]) == 4 and args[1].isdigit()):
+            await update.message.reply_text(usage)
+            return
+        added = await insert_once(session, OwnAccount(user_id=user.id, last4=args[1], kind=kind))
+
+    if not added:
+        await update.message.reply_text(f"XX{args[1]} is already saved.")
+    elif kind == "savings":
+        await update.message.reply_text(
+            f"✅ Saved. Transfers to XX{args[1]} now count as savings, "
+            "and money taken back from it isn't counted as income."
+        )
+    else:
+        await update.message.reply_text(f"✅ Saved XX{args[1]} as your main account.")
 
 
 async def handle_audit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -352,7 +369,7 @@ async def handle_reconcile_command(update: Update, context: ContextTypes.DEFAULT
 
     async with SessionLocal() as session:
         user = await _get_or_create_user(session, chat_id)
-        summary = await reconcile_user(session, provider, user.id)
+        summary = await reconcile(session, provider, user.id, trigger="reconcile")
 
     logger.info("chat=%s: reconcile finished — %s", chat_id, summary.as_message())
 

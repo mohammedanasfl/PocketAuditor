@@ -31,4 +31,6 @@ async def test_set_bot_commands_registers_the_command_list():
         "setbudget",
         "budgets",
         "ask",
+        "plan",
+        "myaccount",
     }

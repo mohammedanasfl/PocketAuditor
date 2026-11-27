@@ -14,7 +14,7 @@ from fastapi import FastAPI
 
 from app.config import settings
 from app.logging_config import configure_logging
-from app.routes import router
+from app.routes import router, wait_for_background_updates
 from app.telegram.bot import build_application, set_bot_commands
 
 configure_logging()  # must run before anything below logs — see app/logging_config.py
@@ -42,6 +42,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     yield
 
     logger.info("Shutting down...")
+    # Finish updates we already answered Telegram for — Telegram won't resend them.
+    await wait_for_background_updates()
     if settings.run_mode == "polling":
         assert application.updater is not None
         await application.updater.stop()

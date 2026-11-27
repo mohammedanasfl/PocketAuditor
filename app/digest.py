@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.categories import SAVINGS_CATEGORY
 from app.models import Expense
 from app.reports import get_spend_summary
+from app.timeutil import local_today
 
 
 @dataclass
@@ -48,7 +49,7 @@ class WeeklyDigest:
 
 
 async def build_weekly_digest(session: AsyncSession, user_id: UUID, *, today: date | None = None) -> WeeklyDigest:
-    today = today or date.today()
+    today = today or local_today()
     week_start = today - timedelta(days=today.weekday())
 
     summary = await get_spend_summary(session, user_id, today=today)

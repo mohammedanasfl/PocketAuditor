@@ -4,18 +4,19 @@
 from __future__ import annotations
 
 import logging
-from uuid import UUID
 
 from telegram import Bot, Update
 from telegram.ext import ContextTypes
 
 from app.agent import PendingQuestion
+from app.agent_core.actions import resolve_pending_action
 from app.audit import AuditQuestion
 from app.categories import CATEGORIES
 from app.db import SessionLocal
 from app.expenses import recategorize_expense, resolve_ask_user_answer
-from app.models import ReconciliationRun
-from app.telegram.keyboards import audit_category_keyboard, category_keyboard
+from app.models import PendingAction, ReconciliationRun
+from app.telegram.handlers._shared import get_user_by_chat, parse_uuid
+from app.telegram.keyboards import audit_category_keyboard, category_keyboard, confirm_keyboard
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,7 @@ async def send_ask_user_message(bot: Bot, chat_id: int, pending: PendingQuestion
 
     async with SessionLocal() as session:
         run = await session.get(ReconciliationRun, pending.run_id)
-        # app.agent._act just created this run in the same reconcile pass —
+        # app.agent.act_on_decision just created this run in the same reconcile pass —
         # guaranteed to still resolve here.
         assert run is not None
         run.telegram_message_id = message.message_id
@@ -58,10 +59,19 @@ async def handle_category_callback(update: Update, context: ContextTypes.DEFAULT
         logger.warning("unknown category key %r in callback_data: %r", key, query.data)
         return
 
-    logger.info("chat=%s: category callback run=%s category=%s", update.effective_chat.id, run_id_str, category)
+    run_id = parse_uuid(run_id_str)
+    if run_id is None:
+        logger.warning("malformed run id in callback_data: %r", query.data)
+        return
+
+    chat_id = update.effective_chat.id
+    logger.info("chat=%s: category callback run=%s category=%s", chat_id, run_id, category)
 
     async with SessionLocal() as session:
-        expense = await resolve_ask_user_answer(session, UUID(run_id_str), category)
+        user = await get_user_by_chat(session, chat_id)
+        expense = None
+        if user is not None:
+            expense = await resolve_ask_user_answer(session, run_id, category, user_id=user.id)
 
     if expense is None:
         logger.info("run=%s: already resolved, ignoring callback", run_id_str)
@@ -69,6 +79,34 @@ async def handle_category_callback(update: Update, context: ContextTypes.DEFAULT
         return
 
     await query.edit_message_text(f"Logged as {category}.")
+
+
+async def send_confirmation(bot: Bot, chat_id: int, action: PendingAction) -> None:
+    """Send one proposed change with Yes/No buttons."""
+    await bot.send_message(chat_id=chat_id, text=action.question, reply_markup=confirm_keyboard(action.id))
+
+
+async def handle_pending_action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Yes/No answer to a change the chat agent proposed (pa:<id>:yes|no)."""
+    query = update.callback_query
+    if query is None or query.data is None:
+        return
+    await query.answer()
+
+    parts = query.data.split(":")
+    if len(parts) != 3 or parts[2] not in ("yes", "no"):
+        logger.warning("malformed pending-action callback_data: %r", query.data)
+        return
+    action_id = parse_uuid(parts[1])
+    if action_id is None:
+        return
+
+    async with SessionLocal() as session:
+        user = await get_user_by_chat(session, update.effective_chat.id)
+        if user is None:
+            return
+        _action, message = await resolve_pending_action(session, action_id, user_id=user.id, approved=parts[2] == "yes")
+    await query.edit_message_text(message)
 
 
 async def send_audit_question(bot: Bot, chat_id: int, question: AuditQuestion) -> None:
@@ -102,12 +140,19 @@ async def handle_audit_category_callback(update: Update, context: ContextTypes.D
         logger.warning("unknown category key %r in audit callback_data: %r", key, query.data)
         return
 
-    logger.info(
-        "chat=%s: audit recategorize expense=%s category=%s", update.effective_chat.id, expense_id_str, category
-    )
+    expense_id = parse_uuid(expense_id_str)
+    if expense_id is None:
+        logger.warning("malformed expense id in audit callback_data: %r", query.data)
+        return
+
+    chat_id = update.effective_chat.id
+    logger.info("chat=%s: audit recategorize expense=%s category=%s", chat_id, expense_id, category)
 
     async with SessionLocal() as session:
-        expense = await recategorize_expense(session, UUID(expense_id_str), category)
+        user = await get_user_by_chat(session, chat_id)
+        expense = None
+        if user is not None:
+            expense = await recategorize_expense(session, expense_id, category, user_id=user.id)
 
     if expense is None:
         await query.edit_message_text("That expense no longer exists.")

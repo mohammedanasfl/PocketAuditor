@@ -7,61 +7,77 @@ sdk: docker
 app_port: 7860
 ---
 
-# PocketAuditor — Statement Reconciliation Agent
+# PocketAuditor — a personal finance agent on Telegram
 
-A Telegram bot that reconciles bank/UPI transactions against a manual expense
-ledger. A transaction can come from a forwarded SMS/UPI text (Phase 1) or a
-photo of a bill/receipt/payment confirmation (Phase 2) — both feed the same
-`transactions` table and the same decision loop. For each unprocessed
-transaction, an LLM-backed agent decides whether to:
+Forward your bank/UPI SMS (or a photo of a receipt) to a Telegram bot. A
+**tool-using LLM agent** decides what each transaction is — the same as an
+expense you already logged, a new expense in a clear category, or something
+to ask you about — while a **policy layer in plain code** checks every write
+before it happens. It also tracks your **salary → savings → spending** month
+(you save a different amount every month; nothing is assumed), warns you
+before you run out, and answers questions in plain language ("how much did I
+spend on food this week?"), asking you to confirm with a button before it
+changes anything.
 
-- **`auto_link`** — match it to an expense you already logged
-- **`auto_log`** — log it as a new expense on its own
-- **`ask_user`** — ask you to pick a category, via a single Telegram message with inline buttons
+Design doc: [`docs/AGENT_DESIGN.md`](docs/AGENT_DESIGN.md).
 
-Every decision (and its reasoning) is written to `reconciliation_runs` for
-auditability. The LLM sits behind one interface (`LLMProvider`) so a local
-Ollama model (dev), Claude, and Gemini are all drop-in interchangeable — see
-`app/llm/` and [Choosing an LLM provider](#choosing-an-llm-provider) below.
+```mermaid
+flowchart LR
+    SMS["Forwarded SMS / photo"] --> P["Parser<br/>regex first, LLM fallback"]
+    CHAT["Chat message / /ask"] --> A
+    P -->|"debit"| A["Agent loop<br/>Gemini 3.5 Flash-Lite<br/>tool calling"]
+    P -->|"to/from own savings"| S["Savings flow<br/>(plain code)"]
+    P -->|"credit"| I["Income (labelled)"]
+    A -->|read tools| D[("Postgres")]
+    A -->|write tools| POL{"Policy<br/>allow / ask / deny"}
+    POL -->|allow| D
+    POL -->|ask| B["Telegram buttons<br/>user decides"]
+    B --> D
+    A --> T["Traces<br/>agent_runs / agent_steps"]
+```
 
-Phase 3a adds monthly per-category budgets (`/setbudget`, `/budgets`) with a
-deterministic (no-LLM) alert when a category crosses 80% of its limit — see
-[Budget alerts](#budget-alerts-phase-3a) below. Phase 3b adds `/ask`, a
-natural-language query over your expense ledger, via a constrained query
-intent the LLM fills in — never raw SQL — see
-[NL query chat](#nl-query-chat-phase-3b) below.
+### What makes it more than an LLM wrapper
 
-Phase 4 turns the bot into a **personal salary auditor**: forwarded credit SMS
-are now captured as income (`/income`), you can register your expected salary
-(`/salary`), and a monthly AI audit (`/audit`, plus a 1st-of-month cron) reports
-income vs. spend vs. savings with LLM-written recommendations, asks you to
-categorize anomalies, and — mid-month — warns you if salary is late or your
-spending pace is too high. See [Salary audit](#salary-audit-phase-4) below.
+| Principle | Where |
+|---|---|
+| **The model proposes, code disposes.** Every write tool call goes through `policy.check()`: no made-up ids, only known categories, never `Savings` on the model's own say-so, confidence threshold, double-charge check, one decision per transaction. Chat changes always need a Yes tap. | `app/agent_core/policy.py` |
+| **The model never does arithmetic.** Every number (totals, spending money, savings %) is computed in Python and returned by a tool. | `app/month_plan.py`, `app/query.py`, `app/audit.py` |
+| **Cheap and deterministic first.** Regex parsing, a remembered-merchant shortcut and own-account detection run with **no LLM call**. | `app/parser.py`, `app/agent_core/reconcile.py`, `app/savings.py` |
+| **Fails safe.** A model error leaves the transaction pending; an undecided transaction is asked about, never guessed. Step, token and daily limits. | `app/agent_core/loop.py` |
+| **Measured, not claimed.** An eval suite with an "unsafe writes" metric that must stay at 0. | `evals/` |
+| **Observable.** Every model reply and tool call (args, result, policy verdict, tokens, latency) is stored. | `agent_runs`, `agent_steps` |
+
+### Results so far (offline evals, no LLM)
+
+| Suite | Before the v2 fixes | Now |
+|---|---|---|
+| Parser (27 real-world SMS shapes) | 63% correct, **8 unsafe** | 93% correct, **0 unsafe** |
+| Reconcile without any LLM (24 scenarios) | — | 0 unsafe; everything that needs judgement is left pending, never guessed |
+
+Run the same suites against Gemini/Claude to get the agent's accuracy, cost
+and latency — see [Evals](#evals).
 
 ## Architecture at a glance
 
 ```
 app/
-  config.py, db.py, models.py, schemas.py   settings, DB, ORM models, Pydantic schemas
-  llm/          LLMProvider Protocol + Ollama/Claude/Gemini providers + factory
-  parser.py     regex-first SMS parser, LLM fallback for ambiguous messages
-  agent.py      perceive -> compare -> decide -> act loop (per-transaction reconcile)
-  audit.py      monthly salary-audit agent + deterministic mid-month alerts
-  income.py     the incomes ledger (money-in) + /income summary
-  salary.py     the per-user salary profile (/salary)
-  budgets.py    deterministic budget-threshold alerts — no LLM involved
-  query.py      QueryIntent -> parameterized SQLAlchemy query -> phrased answer
-  merchant_memory.py   per-merchant remembered category — never ask about the same merchant twice
-  digest.py     deterministic (no LLM) weekly spend digest
-  telegram/     bot handlers (SMS text, photo receipts, /reconcile, /log, /income, /salary, /audit, /setbudget, /budgets, /ask, category + audit callbacks)
-  main.py       FastAPI app: /telegram/webhook, /reconcile, /check-budgets, /run-audit, /check-salary-alerts, /send-weekly-digest, /health
+  agent_core/   the tool-using agent: tools, chat_tools, policy, loop, reconcile, chat, actions, prompts
+  llm/          LLMProvider Protocol (+ tool-calling types) + Gemini/Claude providers + factory
+  parser.py     regex-first SMS parser, LLM fallback; also routes SMS vs. chat
+  savings.py    own-account detection: transfer to savings / withdrawal from savings / income kinds
+  month_plan.py spending money, money left, saved %, run-out date, money alerts
+  agent.py      the original fixed pipeline (RECONCILE_ENGINE=pipeline) + shared act_on_decision
+  audit.py      monthly salary audit (numbers in code, LLM writes the prose)
+  income.py, salary.py, budgets.py, query.py, reports.py, digest.py, merchant_memory.py
+  privacy.py    masks phone/account/card numbers before text reaches an LLM
+  timeutil.py   local_today() in TIMEZONE (default Asia/Kolkata)
+  telegram/     handlers (SMS, chat, photos, commands, inline buttons), allowlist
+  main.py, routes.py, cron.py   FastAPI app, webhook + cron endpoints
 alembic/        migrations
-tests/          pytest suite (all offline — no live Ollama/Telegram/DB needed)
+evals/          scenarios + runner + reports
+tests/          pytest suite (all offline — no live Gemini/Telegram/DB needed)
+docs/           AGENT_DESIGN.md
 ```
-
-`app/agent.py` and `app/parser.py` only ever import `LLMProvider` and the
-Pydantic schemas — never `anthropic` or `httpx` directly — which is what
-keeps the provider swap (and the test suite) cheap.
 
 ---
 
@@ -77,21 +93,12 @@ source venv/bin/activate
 pip install -r requirements-dev.txt   # includes requirements.txt + test deps
 ```
 
-### 2. Ollama (local dev model)
+### 2. Gemini API key (used for local development and production)
 
-```bash
-brew install ollama          # or see https://ollama.com/download
-ollama serve                 # if not already running as a background service
-ollama pull qwen2.5vl:7b
-```
-
-Verify it's up: `curl http://localhost:11434/api/tags`
-
-`qwen2.5vl:7b` (Qwen2.5-VL, the default `LLM_MODEL`) handles all four
-`LLMProvider` methods — `decide_match`, `parse_transaction`, `extract_receipt`,
-*and* `interpret_query` — since it's vision-capable as well as text-capable,
-same family as the original text-only `qwen2.5:7b`. See
-[Photo receipts](#photo-receipts-phase-2) below for more on the vision side.
+Get a key at [aistudio.google.com](https://aistudio.google.com) → "Get API
+key". Put it in `.env` as `GEMINI_API_KEY`. Use a separate key for
+development so it has its own quota. The tests never call Gemini — `pytest`
+needs no key.
 
 ### 3. Neon Postgres
 
@@ -131,11 +138,13 @@ cp .env.example .env
 # fill in DATABASE_URL and TELEGRAM_BOT_TOKEN at minimum
 ```
 
-`LLM_PROVIDER=ollama` / `LLM_MODEL=qwen2.5vl:7b` are the defaults and need
-nothing else. Only set `ANTHROPIC_API_KEY` if you switch to
-`LLM_PROVIDER=claude`, or `GEMINI_API_KEY` if you switch to
-`LLM_PROVIDER=gemini` — see
-[Choosing an LLM provider](#choosing-an-llm-provider) below for the tradeoffs.
+`LLM_PROVIDER=gemini` / `LLM_MODEL=gemini-3.5-flash-lite` are the defaults —
+set `GEMINI_API_KEY`. Also set:
+
+- `ALLOWED_CHAT_IDS` — who may use the bot (comma-separated chat ids, or `*`).
+  Empty means nobody: message the bot once and it replies with your chat id.
+- `TIMEZONE` — defaults to `Asia/Kolkata`; every "today"/month boundary uses it.
+- `RECONCILE_ENGINE` — `agent` (default) or `pipeline` (the original flow).
 
 ### 6. Run the migration
 
@@ -340,35 +349,71 @@ possibly-suspended Neon compute to wake up.
 
 ## Choosing an LLM provider
 
-Three interchangeable `LLMProvider` implementations exist (`app/llm/ollama.py`,
-`app/llm/claude.py`, `app/llm/gemini.py`) — all five methods
-(`decide_match`, `parse_transaction`, `extract_receipt`, `interpret_query`,
-`audit_finances`), same structured-output contract, swap with one `.env` line.
+| | `LLM_PROVIDER=gemini` (default) | `LLM_PROVIDER=claude` |
+|---|---|---|
+| Use | Local development **and** production | Only to compare in the evals |
+| Model | `gemini-3.5-flash-lite` | e.g. `claude-sonnet-5` |
+| Key | `GEMINI_API_KEY` | `ANTHROPIC_API_KEY` |
 
-| | `LLM_PROVIDER=ollama` | `LLM_PROVIDER=claude` | `LLM_PROVIDER=gemini` |
-|---|---|---|---|
-| Cost | Free (your hardware) | Pay-per-request | **Free** (generous daily quota) |
-| Setup | `ollama serve` running locally | `ANTHROPIC_API_KEY` | `GEMINI_API_KEY` |
-| Where it runs | Your machine only | Cloud — deployable anywhere | Cloud — deployable anywhere |
-| Data privacy | Never leaves your machine | Anthropic's standard API terms | **Free tier: Google may use prompts/responses to improve their models** |
+Both implement every `LLMProvider` method, including `chat_with_tools` for
+the agent. Any SDK or network error becomes `LLMDecisionError`, which the
+app already handles (the transaction stays pending, or the chat says
+"try again"). Note: on Gemini's free tier Google may use prompts to improve
+its models — account/phone numbers are masked first (`app/privacy.py`).
 
-**Gemini is the recommended free option if you want this deployed somewhere
-other than your own laptop** (see [Running it](#running-it) — a long-poller
-needs *something* up 24/7). Get a key at
-[aistudio.google.com](https://aistudio.google.com) → "Get API key" → "Create
-API key" — no credit card, no billing account, genuinely free with no
-expiration. Set `LLM_MODEL` to one of Google's `-latest` aliases
-(`gemini-flash-lite-latest` is the default here) rather than a pinned version
-like `gemini-2.5-flash` — Google retires specific dated model versions for
-new API keys fairly often (that exact 404 happened during this project's own
-setup), while the `-latest` aliases keep pointing at whatever's current.
+---
 
-One caveat worth knowing: Gemini's free tier occasionally returns a `503
-UNAVAILABLE` ("high demand") error on `-latest`-alias models, especially the
-non-lite tier — this surfaces as `LLMDecisionError` same as any other
-provider hiccup (see `app/llm/base.py`'s `LLMDecisionError` contract), so
-existing retry/guard/graceful-fallback behavior already covers it; it just
-means an occasional message needs a retry rather than being unusable.
+## The agent (v2)
+
+Every forwarded debit SMS is decided right away (no need to run
+`/reconcile`, though it still works for anything left pending):
+
+1. **Remembered merchant** (exact or fuzzy — "ZOMATO LTD" ≈ "zomato@hdfc")
+   and nothing to match → logged by plain code, no LLM call.
+2. Otherwise the agent gets the transaction and these tools:
+   `find_matching_expenses`, `recall_merchant`, `check_duplicate_charge`
+   (read) and `link_to_expense`, `log_as_new_expense`,
+   `ask_user_for_category` (write, checked by the policy).
+3. If the agent ends without deciding, you're asked. If the model is down,
+   the transaction stays pending and is retried.
+
+Any text that isn't a bank SMS goes to the **chat agent** (so does `/ask`).
+It reads with `get_month_plan`, `get_spending`, `get_balance`,
+`list_expenses`, `get_budgets`, `get_salary_settings`, and proposes changes
+with `set_budget`, `recategorize_expense`, `log_cash_expense`,
+`remember_savings_account` — each one is shown to you as a Yes/No question
+and runs only after you tap Yes. It remembers the last 10 messages, so
+follow-ups like "and last week?" work.
+
+Limits (in `.env`): `AGENT_MAX_STEPS=8`, `AGENT_MAX_TOKENS_PER_RUN=40000`,
+`AGENT_MAX_RUNS_PER_DAY=200`. Inspect a run with SQL:
+
+```sql
+select step_no, kind, tool_name, verdict, args, result, latency_ms
+from agent_steps where run_id = '<id>' order by step_no;
+```
+
+## Salary → savings → spending
+
+You save a different amount every month, so nothing assumes a percentage:
+
+1. `/myaccount savings 4321` once (last 4 digits of your savings account),
+   and optionally `/myaccount main 1234` (the account your salary arrives in).
+2. Forward your salary SMS → recorded as income of kind `salary`.
+3. Forward the SMS when you move money to savings (any amount, any number of
+   times) → filed as `Savings`, not spending.
+4. Spend as usual. If you take money back from savings, forward that SMS →
+   recorded as `savings_withdrawal`, **not** income.
+
+`/plan` shows the month so far:
+
+```
+spending money = salary + other income − moved to savings + taken back
+money left     = spending money − spent
+```
+
+Alerts (each at most once a month): half used, only 20% left, ran out, and
+"at this pace you run out around the 22nd".
 
 ---
 
@@ -380,16 +425,8 @@ items, then creates a `transactions` row (`source='photo'`) that goes through
 the exact same reconciliation loop as an SMS-sourced one.
 
 **Vision provider requirement:** this uses the LLM's native vision, not a
-separate OCR library. The default `LLM_MODEL` (`qwen2.5vl:7b`) is
-vision-capable, so `LLM_PROVIDER=ollama` handles this locally — one model
-covers `decide_match`, `parse_transaction`, and `extract_receipt`. Claude
-(`LLM_PROVIDER=claude`) remains a fully-supported alternative (e.g. for prod,
-or if a heavier/better vision model is worth the API cost). Note:
-`OllamaProvider.extract_receipt` doesn't independently verify the configured
-model is vision-capable — if you revert `LLM_MODEL` to a text-only model
-(e.g. `qwen2.5:7b`), extract_receipt's behavior depends on how that model and
-Ollama handle an unsupported `images` field, which hasn't been characterized
-here; the working, tested configuration is `qwen2.5vl:7b` or Claude.
+separate OCR library. Gemini 3.5 Flash-Lite (the default) and Claude both
+accept images.
 
 **Low-quality images degrade gracefully, not silently.** The model sets
 `readable=false` on its own output whenever it can't trust what it read
@@ -509,57 +546,11 @@ above for why daily rather than weekly.
 
 ---
 
-## NL query chat (Phase 3b)
+## Chat questions (replaces the old `/ask` query builder)
 
-`/ask <question>` answers a single, self-contained question about your
-finances, e.g. `/ask how much did I spend on food this week`, `/ask biggest
-expense last month`, or `/ask how much money do I have left this month`.
-Each `/ask` is independent — there's no multi-turn refinement ("what about
-last month?" as a follow-up starts over, it isn't remembered).
-
-**Constrained query builder, not free-form SQL generation.** The LLM never
-sees or produces SQL. `LLMProvider.interpret_query(question)` fills in a
-small, fixed `QueryIntent` (category, one of six date-range enums, an
-aggregation type, plus a one-sentence summary) — the *only* thing an LLM ever
-produces for `/ask`. `app/query.py:run_query` is the one hand-written place
-that turns a `QueryIntent` into a real, parameterized SQLAlchemy query
-against `expenses` (and, for `aggregation="net"`, `incomes` too); every value
-(including `category`, matched case-insensitively) is bound as a query
-parameter, never concatenated into SQL text — so nothing in the question,
-however it's phrased, can alter the query's structure. `tests/test_query.py`
-proves this directly: a `category` containing `'; DROP TABLE expenses; --`
-is treated as an inert literal string that simply matches nothing.
-
-**`aggregation="net"` answers "how much money do I have left" (Phase 4).**
-The other four aggregations (`sum`/`count`/`max`/`list`) only ever read
-`expenses` — they have no concept of income at all, so a balance question
-used to fall through `is_financial_question=false` and get a
-spending-only fallback reply. `net` sums `incomes` and `expenses` (excluding
-the `Savings` category — see below) for the period and reports the
-difference, e.g. `"You have Rs.30,000.00 left this month (Rs.50,000.00
-income − Rs.20,000.00 spent)."`, or the overspent phrasing when negative.
-Unlike the other aggregations, `net` is well-defined even with zero activity
-(`"Rs.0.00 left"`), so it never falls back to the "No expenses found" reply.
-
-**Answers are phrased by string formatting, not a second LLM call** — e.g.
-`"You spent Rs.500.00 on Food this week across 2 transactions."` The numbers
-in the reply must be exactly what the query returned; a model re-stating
-them is one more chance (however small) to transcribe them wrong. Same
-reasoning as `agent.py`'s `_apply_guard` re-checking a decision in code
-rather than trusting the model's own arithmetic.
-
-**Guardrails:**
-- A `date_range`/`category` combination that matches no expenses replies
-  plainly — `"No expenses found for that period."` — rather than a confusing
-  empty answer (this doesn't apply to `net`, which always has an answer).
-- If `interpret_query`'s structured output fails validation twice (same
-  retry pattern as Phase 1's `decide_match`), the reply falls back to "I
-  couldn't understand that question — try phrasing it like 'how much on food
-  this week?'"
-- `aggregation="list"` replies cap at 10 items, with a "…and N more" note if
-  the actual count is higher.
-
----
+Just type a question — or use `/ask <question>`. The chat agent answers from
+tools that run parameterized queries (never SQL from the model) and repeats
+their numbers. See [The agent (v2)](#the-agent-v2).
 
 ## Salary audit (Phase 4)
 
@@ -638,28 +629,43 @@ and salary alerts.
 pytest
 ```
 
-Runs automatically on every push/PR to `main` via
-`.github/workflows/ci.yml` — no secrets required, since the whole suite is
-offline (`DATABASE_URL`/`TELEGRAM_BOT_TOKEN` in that workflow are just
-placeholders to satisfy `Settings()`'s required fields at import time; the
-tests themselves never connect to Postgres or Telegram). This is CI only —
-Render keeps deploying on every push to `main` exactly as it already did;
-this workflow doesn't gate that.
+### CI (`.github/workflows/ci.yml`)
 
-268 tests, all offline (mocked HTTP/API calls, aiosqlite for DB tests) — no
-live Ollama, Telegram, Neon, or Gemini/Claude connection required. Covers:
+Runs on **every commit on every branch** (a pull request shows its latest
+commit's checks) and on demand. No secrets needed.
 
+| Job | What it checks |
+|---|---|
+| Lint + types | `ruff check`, `ruff format --check`, `mypy app` |
+| Tests | `pytest` with coverage — fails below 85% (currently ~88%) |
+| Offline evals | parser + both reconcile engines with no LLM; fails if any scenario writes wrong data |
+| Postgres | real Postgres 16: `alembic upgrade head`, full downgrade + upgrade, `alembic check` (models match migrations), and `scripts/postgres_smoke.py` (savings month, agent, approvals, audit) |
+| Docker | the image builds and the app imports inside it |
+| Live evals (separate, manual) | `.github/workflows/live-evals.yml` — Actions → "Live evals (Gemini)" → Run workflow: runs the evals against Gemini using the `GEMINI_API_KEY` repository secret and uploads the reports |
+
+CI doesn't deploy anything — deployment stays separate.
+
+All tests are offline (mocked HTTP/API calls, aiosqlite for DB tests) — no
+live Gemini/Claude, Telegram or Neon connection required. Covers:
+
+- **Agent core** (`tests/test_agent_core.py`) — a scripted model drives the
+  real loop: logging, linking, every policy rule (hallucinated id, low
+  confidence, invented category, Savings, double charge, caption-less photo,
+  double decision), unknown tools/bad arguments, model failure, step and
+  daily limits, the no-LLM memory shortcut, and both providers'
+  tool-calling conversions.
+- **Chat + savings** (`tests/test_chat_and_savings.py`) — chat answers from
+  tools, Yes/No approvals (including another user trying to approve), the
+  full varying-savings month from the design doc, money alerts.
+- **Phase 0 regressions** (`tests/test_phase0_regressions.py`) — one test per
+  fixed bug.
+- **Evals** (`tests/test_evals.py`) — the offline eval suites must write 0
+  unsafe data.
 - **Provider parity** (`tests/test_llm_providers.py`,
   `tests/test_agent_provider_parity.py`, `tests/test_audit_provider_parity.py`)
-  — identical mocked model output run through `OllamaProvider`,
-  `ClaudeProvider`, and `GeminiProvider` (and through the full agent and audit
-  loops) produces byte-for-byte equal results across all three, for every
-  method including `interpret_query` and `audit_finances`.
-  `test_llm_providers.py` also covers `extract_receipt` (a clear receipt, a
-  blurry one, a non-receipt image — all assert on `readable` rather than a
-  hallucinated total) and that an Ollama-side HTTP failure (e.g. a
-  non-vision model rejecting the request) surfaces as `LLMDecisionError`,
-  never a raw `httpx` exception.
+  — identical mocked model output through `GeminiProvider` and
+  `ClaudeProvider` gives equal results, for every structured-output method;
+  SDK/network errors surface as `LLMDecisionError`.
 - **Parser** (`tests/test_parser.py`) — realistic HDFC/ICICI/SBI/UPI SMS
   fixtures resolved by regex alone; low-confidence/garbage messages routed to
   the LLM fallback.
@@ -731,31 +737,37 @@ tests only prove it against mocked responses):
 
 ```bash
 python -m scripts.try_decide           # uses LLM_PROVIDER from .env
-python -m scripts.try_decide --both    # Ollama and Claude side by side (needs ANTHROPIC_API_KEY)
+python -m scripts.try_decide --both    # Gemini and Claude side by side (needs ANTHROPIC_API_KEY)
 ```
 
 (This script now also exercises `interpret_query` alongside `decide_match`
-and `parse_transaction`. `--both` compares Ollama and Claude specifically;
+and `parse_transaction`. `--both` compares Gemini and Claude specifically;
 to try Gemini instead, just set `LLM_PROVIDER=gemini` in `.env` and run
 without `--both` — `get_provider()` picks it up like any other provider.)
 
 ---
 
+## Evals
+
+```bash
+python -m evals.run --suite parser --provider none          # offline
+python -m evals.run --suite reconcile --provider none --engine agent
+python -m evals.run --suite reconcile --provider gemini --engine agent
+python -m evals.run --suite reconcile --provider gemini --engine pipeline
+python -m evals.run --suite reconcile --provider claude --model claude-sonnet-5 --engine agent
+```
+
+Reports land in `evals/results/`. "Unsafe" (wrong money data written) must
+be 0; the offline suites run in CI (`tests/test_evals.py`). See
+[`evals/README.md`](evals/README.md).
+
 ## What's not built yet
 
-Per the Phase 1/2/3 briefs: no voice transcription, no line-item-level
-categorization of a receipt's individual items (the whole receipt is one
-transaction), no multi-photo/multi-page receipt stitching. `ask_user` is a
-single question with inline buttons, and `/ask` is a single self-contained
-question — neither is a multi-turn dialogue; asking a follow-up starts over
-rather than being remembered.
-
-Phase 4 does add the two things earlier phases deliberately avoided —
-forecasting (the mid-month `pace_high` alert projects month-end spend) and
-recommendations (the monthly audit's LLM-written advice) — but only inside the
-salary audit, and always grounded in figures computed in code (the LLM never
-produces a number). Still out of scope for Phase 4: multi-currency, running the
-income side through a reconcile/matching loop (credits are recorded directly),
-auto-setting budgets from spend, a savings *goal* tracker beyond the single
-monthly `savings_target`, and back-filling credits that were discarded before
-this phase existed.
+- Multi-currency; voice notes; line items of a receipt as separate expenses.
+- A credit SMS *from the savings account's own bank* ("A/c XX4321 credited
+  with ...") is treated as ordinary income — forward the SMS from your salary
+  account for transfers.
+- Agent runs are not resumed after a Yes/No tap: the approved change runs in
+  plain code and the conversation continues from there.
+- The monthly audit and alerts stay deterministic with LLM-written prose
+  only; they are not run through the tool-using agent.

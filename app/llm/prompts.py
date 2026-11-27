@@ -1,6 +1,6 @@
 """Provider-agnostic prompt text and payload builders.
 
-Both OllamaProvider and ClaudeProvider send the exact same system prompt and
+GeminiProvider and ClaudeProvider send the exact same system prompt and
 payload shape — the only thing that differs between them is the transport.
 """
 

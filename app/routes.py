@@ -18,8 +18,10 @@ trigger an LLM run for every user in the database.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import secrets
+from collections import deque
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request
 from telegram import Update
@@ -37,6 +39,23 @@ from app.cron import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Last few hundred Telegram update ids, to drop Telegram's resends. In memory
+# is enough: resends arrive within minutes, and this app runs as one process.
+_RECENT_UPDATES_TO_KEEP = 500
+_recent_update_ids: deque = deque(maxlen=_RECENT_UPDATES_TO_KEEP)
+_background_tasks: set[asyncio.Task] = set()
+
+
+async def wait_for_background_updates() -> None:
+    """Called on shutdown: let in-flight updates finish before the bot stops."""
+    if _background_tasks:
+        await asyncio.gather(*_background_tasks, return_exceptions=True)
+
+
+def _remember_update_id(update_id: object) -> None:
+    if update_id is not None:
+        _recent_update_ids.append(update_id)
 
 
 def _verify_cron_secret(x_cron_secret: str | None = Header(default=None)) -> None:
@@ -61,9 +80,22 @@ async def telegram_webhook(
 
     application: Application = request.app.state.application
     data = await request.json()
-    logger.info("webhook: received update_id=%s", data.get("update_id"))
+    update_id = data.get("update_id")
+    logger.info("webhook: received update_id=%s", update_id)
+
+    # Telegram resends an update if we don't answer quickly. Skip repeats so
+    # one forwarded SMS is never saved twice.
+    if update_id in _recent_update_ids:
+        logger.info("webhook: update_id=%s already seen, skipping", update_id)
+        return {"ok": True}
+    _remember_update_id(update_id)
+
+    # Answer Telegram right away and do the (possibly slow, LLM-calling) work
+    # in the background, so Telegram has no reason to resend.
     update = Update.de_json(data, application.bot)
-    await application.process_update(update)
+    task = asyncio.create_task(application.process_update(update))
+    _background_tasks.add(task)  # keep a reference so the task isn't garbage-collected
+    task.add_done_callback(_background_tasks.discard)
     return {"ok": True}
 
 

@@ -28,8 +28,10 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.categories import SAVINGS_CATEGORY
+from app.income import COUNTS_AS_INCOME
 from app.models import Expense, Income
 from app.schemas import QueryIntent
+from app.timeutil import local_today
 
 logger = logging.getLogger(__name__)
 
@@ -160,7 +162,7 @@ async def _run_net_query(
             (
                 await session.execute(
                     select(func.coalesce(func.sum(Income.amount), 0)).where(
-                        Income.user_id == user_id, Income.txn_date >= start, Income.txn_date <= end
+                        Income.user_id == user_id, Income.txn_date >= start, Income.txn_date <= end, COUNTS_AS_INCOME
                     )
                 )
             ).scalar_one()
@@ -212,7 +214,7 @@ async def run_query(
     query below (category, date bounds) goes through SQLAlchemy's parameter
     binding, never string concatenation — so nothing in `intent.category`,
     however it's spelled, can affect the query's structure."""
-    today = today or date.today()
+    today = today or local_today()
     start, end = resolve_date_range(intent, today)
 
     if intent.aggregation == "net":
