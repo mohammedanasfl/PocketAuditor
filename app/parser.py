@@ -31,22 +31,34 @@ logger = logging.getLogger(__name__)
 _LLM_FALLBACK_THRESHOLD = 0.75
 
 _AMOUNT_RE = re.compile(
-    r"(?:INR|Rs\.?|₹)\s*([\d,]+(?:\.\d{1,2})?)|\b([\d,]+(?:\.\d{1,2})?)\s*(?:INR|Rs\.?|₹)\b",
+    # \d[\d,]* (not [\d,]+) so a lone comma — "Dear Customer, INR 500" —
+    # is never read as an amount.
+    r"(?:INR|Rs\.?|₹)\s*(\d[\d,]*(?:\.\d{1,2})?)|\b(\d[\d,]*(?:\.\d{1,2})?)\s*(?:INR|Rs\.?|₹)\b",
     re.IGNORECASE,
 )
-_DEBIT_RE = re.compile(r"\b(?:debited|debit|spent|paid|withdrawn|purchase|sent|transferred)\b", re.IGNORECASE)
-_CREDIT_RE = re.compile(r"\b(?:credited|credit|received|refunded|deposited)\b", re.IGNORECASE)
+# "credit card" / "debit card" name a card, not a direction — the
+# (?!\s*card) part stops "your credit card bill" from reading as money in.
+_DEBIT_RE = re.compile(
+    r"\b(?:debited|debit(?!\s*card)|spent|paid|withdrawn|purchase|sent|transferred)\b", re.IGNORECASE
+)
+_CREDIT_RE = re.compile(r"\b(?:credited|credit(?!\s*card)|received|refunded|deposited)\b", re.IGNORECASE)
 
 # Words that come right before an account *balance* or *limit* figure. An
 # amount right after one of these is not the transaction amount — e.g.
 # "Avl Bal Rs.12,000. Rs.500 debited" must give 500, not 12,000.
-_BALANCE_WORDS_RE = re.compile(r"(?:bal|balance|limit)\W{0,3}$", re.IGNORECASE)
+_BALANCE_WORDS_RE = re.compile(r"(?:bal|balance|limit|lmt)(?:\s+(?:is|of))?\W{0,3}$", re.IGNORECASE)
 
-# Messages that mention money but are never a completed transaction.
-_NOT_A_TRANSACTION_RE = re.compile(
-    r"\b(?:otp|one[\s-]time[\s-]password|verification code)\b",
+# OTP / verification-code messages. Many real alerts end with a safety
+# footer like "Never share your OTP" — so an OTP word only rejects the
+# message when no money actually moved (see is_not_a_transaction).
+_OTP_RE = re.compile(r"\b(?:otp|one[\s-]time[\s-]password|verification code)\b", re.IGNORECASE)
+# Words that mean money already moved.
+_COMPLETED_RE = re.compile(
+    r"\b(?:debited|credited|spent|paid|withdrawn|sent|received|refunded|deposited|transferred)\b",
     re.IGNORECASE,
 )
+# A future/scheduled debit (mandate, autopay reminder) hasn't happened yet.
+_FUTURE_RE = re.compile(r"\bwill be (?:debited|credited|deducted)\b", re.IGNORECASE)
 
 _MONTHS = {
     "jan": 1,
@@ -119,7 +131,7 @@ def _parse_amount(text: str) -> Decimal | None:
         try:
             return Decimal(raw).quantize(Decimal("0.01"))
         except InvalidOperation:
-            return None
+            continue  # not a usable number — try the next amount
     return None
 
 
@@ -142,9 +154,14 @@ def _parse_direction(text: str) -> bool | None:
 
 
 def is_not_a_transaction(text: str) -> bool:
-    """OTP / verification messages mention an amount but are never a real
-    transaction — reject them before any parsing."""
-    return _NOT_A_TRANSACTION_RE.search(text) is not None
+    """Messages that mention an amount but are never a completed transaction:
+    reminders about money that will move later, and OTP messages (unless
+    money actually moved — then the OTP word is just a safety footer)."""
+    if _FUTURE_RE.search(text):
+        return True
+    if _OTP_RE.search(text) and not _COMPLETED_RE.search(text):
+        return True
+    return False
 
 
 def _parse_date(text: str) -> date | None:
@@ -280,6 +297,11 @@ async def parse_sms(raw_text: str, provider: LLMProvider) -> ParsedTransaction:
     if not extraction.is_transaction or extraction.amount is None:
         logger.info("llm fallback: not a transaction (%r)", raw_text[:40])
         raise ParseError("This message doesn't look like a bank/UPI transaction alert.")
+    if extraction.is_debit is None:
+        # Never guess whether money came in or went out — a wrong guess turns
+        # income into spend or the other way round.
+        logger.info("llm fallback: direction unknown (%r)", raw_text[:40])
+        raise ParseError("I couldn't tell whether money came in or went out.")
 
     logger.info(
         "parsed via llm: amount=%s merchant=%r txn_date=%s is_debit=%s",
@@ -292,7 +314,7 @@ async def parse_sms(raw_text: str, provider: LLMProvider) -> ParsedTransaction:
         amount=Decimal(str(extraction.amount)).quantize(Decimal("0.01")),
         merchant=extraction.merchant,
         txn_date=extraction.txn_date or local_today(),
-        is_debit=extraction.is_debit if extraction.is_debit is not None else True,
+        is_debit=extraction.is_debit,
         confidence=1.0,
         method="llm",
     )

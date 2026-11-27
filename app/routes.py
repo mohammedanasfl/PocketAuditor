@@ -47,6 +47,12 @@ _recent_update_ids: deque = deque(maxlen=_RECENT_UPDATES_TO_KEEP)
 _background_tasks: set[asyncio.Task] = set()
 
 
+async def wait_for_background_updates() -> None:
+    """Called on shutdown: let in-flight updates finish before the bot stops."""
+    if _background_tasks:
+        await asyncio.gather(*_background_tasks, return_exceptions=True)
+
+
 def _remember_update_id(update_id: object) -> None:
     if update_id is not None:
         _recent_update_ids.append(update_id)

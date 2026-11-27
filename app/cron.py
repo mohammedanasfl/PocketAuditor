@@ -10,17 +10,27 @@ from __future__ import annotations
 import logging
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 from telegram.ext import Application
 
 from app.agent import reconcile_user
 from app.audit import check_midmonth_alerts, run_monthly_audit
 from app.budgets import check_budget_alerts
+from app.config import settings
 from app.db import SessionLocal
 from app.digest import build_weekly_digest
 from app.models import User
+from app.telegram.access import is_chat_allowed
 from app.telegram.handlers import send_ask_user_message, send_audit_question
 
 logger = logging.getLogger(__name__)
+
+
+async def _allowed_users(session: AsyncSession) -> list[User]:
+    """Every user still on ALLOWED_CHAT_IDS — someone removed from the list
+    gets no more cron messages or LLM runs."""
+    users = (await session.execute(select(User))).scalars().all()
+    return [user for user in users if is_chat_allowed(user.telegram_chat_id, settings.allowed_chat_ids)]
 
 
 async def reconcile_all_users(application: Application) -> None:
@@ -28,7 +38,7 @@ async def reconcile_all_users(application: Application) -> None:
     provider = application.bot_data["llm_provider"]
 
     async with SessionLocal() as session:
-        users = (await session.execute(select(User))).scalars().all()
+        users = await _allowed_users(session)
     logger.info("background reconcile: %d user(s) to process", len(users))
 
     for user in users:
@@ -50,7 +60,7 @@ async def reconcile_all_users(application: Application) -> None:
 async def check_budgets_all_users(application: Application) -> None:
     """The daily-cron body: check budget alerts for every known user."""
     async with SessionLocal() as session:
-        users = (await session.execute(select(User))).scalars().all()
+        users = await _allowed_users(session)
     logger.info("background check-budgets: %d user(s) to process", len(users))
 
     for user in users:
@@ -71,7 +81,7 @@ async def run_audit_all_users(application: Application) -> None:
     provider = application.bot_data["llm_provider"]
 
     async with SessionLocal() as session:
-        users = (await session.execute(select(User))).scalars().all()
+        users = await _allowed_users(session)
     logger.info("background audit: %d user(s) to process", len(users))
 
     for user in users:
@@ -94,7 +104,7 @@ async def check_salary_alerts_all_users(application: Application) -> None:
     check_budgets_all_users; check_midmonth_alerts itself dedups so a daily
     check doesn't mean daily nagging."""
     async with SessionLocal() as session:
-        users = (await session.execute(select(User))).scalars().all()
+        users = await _allowed_users(session)
     logger.info("background check-salary-alerts: %d user(s) to process", len(users))
 
     for user in users:
@@ -113,7 +123,7 @@ async def send_weekly_digest_all_users(application: Application) -> None:
     LLM) weekly spend digest. Same shape as check_budgets_all_users — no
     llm_provider needed."""
     async with SessionLocal() as session:
-        users = (await session.execute(select(User))).scalars().all()
+        users = await _allowed_users(session)
     logger.info("background send-weekly-digest: %d user(s) to process", len(users))
 
     for user in users:

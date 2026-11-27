@@ -83,7 +83,7 @@ class RunSummary:
 def _transaction_to_dict(txn: Transaction) -> dict:
     return {
         "amount": str(txn.amount),
-        "merchant": txn.merchant,
+        "merchant": redact(txn.merchant) if txn.merchant else None,
         "txn_date": txn.txn_date.isoformat(),
         "raw_text": redact(txn.raw_text),
         "category_hint": txn.category_hint,
@@ -338,6 +338,21 @@ async def _reconcile_user_locked(session: AsyncSession, provider: LLMProvider, u
     )
     result = await session.execute(stmt)
     transactions = list(result.scalars().all())
+
+    # A transaction we already asked about stays 'pending' until the user
+    # taps a button. Don't ask about it again on every run.
+    already_asked = set(
+        (
+            await session.execute(
+                select(ReconciliationRun.transaction_id).where(
+                    ReconciliationRun.user_id == user_id, ReconciliationRun.status == "open"
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    transactions = [txn for txn in transactions if txn.id not in already_asked]
     logger.info("reconcile_user: user=%s — %d pending transaction(s)", user_id, len(transactions))
 
     for txn in transactions:

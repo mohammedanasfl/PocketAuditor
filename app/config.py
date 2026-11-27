@@ -4,8 +4,9 @@ everything goes through this Settings object, loaded once at import time."""
 from __future__ import annotations
 
 from typing import Literal
+from zoneinfo import ZoneInfo
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -70,6 +71,16 @@ class Settings(BaseSettings):
     # --- Runtime ------------------------------------------------------
     run_mode: Literal["webhook", "polling"] = "webhook"
     port: int = 7001
+
+    @field_validator("timezone")
+    @classmethod
+    def _timezone_must_exist(cls, value: str) -> str:
+        """Fail at startup, not on the first message, if TIMEZONE is a typo."""
+        try:
+            ZoneInfo(value)
+        except Exception as exc:  # ZoneInfo raises KeyError/ImportError, pydantic needs ValueError
+            raise ValueError(f"unknown TIMEZONE {value!r}") from exc
+        return value
 
 
 settings = Settings()  # type: ignore[call-arg]  # required env vars come from .env / real env

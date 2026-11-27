@@ -30,15 +30,21 @@ from app.timeutil import local_today
 logger = logging.getLogger(__name__)
 
 
-async def _sms_already_saved(session: AsyncSession, user_id: UUID, raw_text: str) -> bool:
-    """True if this exact SMS text is already saved as a transaction or an income."""
+async def _sms_already_saved(session: AsyncSession, user_id: UUID, raw_text: str, txn_date: date) -> bool:
+    """True if this exact SMS, for the same date, is already saved as a
+    transaction or an income. The date matters: a short app notification
+    like "Paid Rs.20 to Chai Point" can honestly repeat on another day."""
     txn_match = await session.execute(
-        select(Transaction.id).where(Transaction.user_id == user_id, Transaction.raw_text == raw_text).limit(1)
+        select(Transaction.id)
+        .where(Transaction.user_id == user_id, Transaction.txn_date == txn_date, Transaction.raw_text == raw_text)
+        .limit(1)
     )
     if txn_match.first() is not None:
         return True
     income_match = await session.execute(
-        select(Income.id).where(Income.user_id == user_id, Income.raw_text == raw_text).limit(1)
+        select(Income.id)
+        .where(Income.user_id == user_id, Income.txn_date == txn_date, Income.raw_text == raw_text)
+        .limit(1)
     )
     return income_match.first() is not None
 
@@ -55,16 +61,16 @@ async def ingest_sms_transaction(
     session: AsyncSession, user: User, raw_text: str, provider: LLMProvider
 ) -> SmsIngestResult:
     """Plain-text message handling: treat as forwarded SMS/UPI text."""
-    if await _sms_already_saved(session, user.id, raw_text):
-        # The same SMS forwarded twice would otherwise count the money twice
-        # (a salary forwarded twice doubles your income).
-        logger.info("user=%s: this exact SMS was already saved, skipping", user.id)
-        return SmsIngestResult(outcome="already_seen")
-
     try:
         parsed = await parse_sms(raw_text, provider)
     except ParseError:
         return SmsIngestResult(outcome="parse_error")
+
+    if await _sms_already_saved(session, user.id, raw_text, parsed.txn_date):
+        # The same SMS forwarded twice would otherwise count the money twice
+        # (a salary forwarded twice doubles your income).
+        logger.info("user=%s: this exact SMS was already saved, skipping", user.id)
+        return SmsIngestResult(outcome="already_seen")
 
     if not parsed.is_debit:
         # Money-in: record it in the incomes ledger for the monthly salary

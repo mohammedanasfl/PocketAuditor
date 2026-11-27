@@ -6,6 +6,7 @@ import logging
 from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import User
@@ -28,10 +29,18 @@ def parse_uuid(text: str) -> UUID | None:
 
 
 async def _get_or_create_user(session: AsyncSession, chat_id: int) -> User:
-    result = await session.execute(select(User).where(User.telegram_chat_id == chat_id))
-    user = result.scalar_one_or_none()
-    if user is None:
-        user = User(telegram_chat_id=chat_id)
-        session.add(user)
+    user = await get_user_by_chat(session, chat_id)
+    if user is not None:
+        return user
+    user = User(telegram_chat_id=chat_id)
+    session.add(user)
+    try:
         await session.commit()
+    except IntegrityError:
+        # Two first messages arrived at once and the other one created the
+        # user a moment ago — use that row.
+        await session.rollback()
+        existing = await get_user_by_chat(session, chat_id)
+        assert existing is not None
+        return existing
     return user

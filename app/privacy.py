@@ -10,12 +10,19 @@ from __future__ import annotations
 
 import re
 
-# 9 or more digits in a row: phone numbers (10), UPI refs (12), card/account
-# numbers. Amounts are at most 8 digits without commas (Rs.1,00,00,000 is
-# already written with commas in bank SMS).
-_LONG_NUMBER_RE = re.compile(r"\d{9,}")
+# Each pattern is one kind of sensitive number. Amounts are never matched:
+# they are at most 8 digits without commas (bank SMS write Rs.1,00,00,000
+# with commas).
+_SENSITIVE_NUMBER_PATTERNS = [
+    re.compile(r"\b\d{4}[\s-]\d{4}[\s-]\d{4}[\s-]\d{4}\b"),  # card: 4111 1111 1111 1111
+    re.compile(r"\+91[\s-]?\d{5}[\s-]?\d{5}\b"),  # phone: +91 98765 43210
+    re.compile(r"\b1800[\s-]\d{3}[\s-]\d{4}\b"),  # toll-free: 1800-258-6161
+    re.compile(r"\d{9,}"),  # any 9+ digits: phones, UPI refs, account numbers
+]
 
 
 def redact(text: str) -> str:
-    """Replace every run of 9+ digits with [number]."""
-    return _LONG_NUMBER_RE.sub("[number]", text)
+    """Replace sensitive numbers with [number]."""
+    for pattern in _SENSITIVE_NUMBER_PATTERNS:
+        text = pattern.sub("[number]", text)
+    return text
