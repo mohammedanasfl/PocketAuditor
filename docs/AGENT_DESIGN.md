@@ -1,6 +1,6 @@
 # PocketAuditor v2 — Agent Design
 
-Status: **Proposed** · Scope: turn the fixed reconcile/audit pipelines into one
+Status: **Proposed** · Coding rule: see §2 · Scope: turn the fixed reconcile/audit pipelines into one
 tool-using agent, without losing the guarantees the current code already gives.
 
 ## 1. Goals and non-goals
@@ -23,7 +23,23 @@ tool-using agent, without losing the guarantees the current code already gives.
 - Replacing the deterministic parts. Regex parsing, all money math, budget
   alerts, and mid-month alerts stay as plain code — the agent calls them as tools.
 
-## 2. Guiding principles
+## 2. Coding rule: simple code, good engineering
+
+The code must be easy for a beginner to read and explain. Concretely:
+
+- Plain functions first. A class only when it clearly groups data + behaviour.
+- No clever tricks: no metaclasses, decorators-that-register-things magic,
+  deep inheritance, dynamic imports, or one-line comprehensions that need a
+  second read. A simple `for` loop with `if` is preferred.
+- Small functions with clear names (`is_salary_credit`, `move_to_savings`),
+  each doing one thing. Short comment only where the *why* isn't obvious.
+- Explicit over abstract: if two places need the same 5 lines, a shared helper
+  is fine; a generic framework is not.
+- Every rule that touches money is plain Python with a unit test next to it.
+- Still good engineering: type hints, tests, ruff + mypy clean, one
+  responsibility per module, no secrets in code.
+
+## 3. Guiding principles
 
 | Principle | What it means in code |
 |---|---|
@@ -33,7 +49,7 @@ tool-using agent, without losing the guarantees the current code already gives.
 | Boring infrastructure | Reuse Postgres for everything (state, memory, traces). No new services. |
 | Measure before adding complexity | Embeddings, a bigger model, or more tools are added only when an eval shows the gap. |
 
-## 3. Architecture
+## 4. Architecture
 
 ```mermaid
 flowchart TB
@@ -50,7 +66,7 @@ flowchart TB
 
     subgraph Core["Agent core"]
         AG["Agent loop<br/>plan → call tool → observe<br/>(max 8 steps)"]
-        LLM["LLMProvider.chat_with_tools()<br/>Claude · Gemini · Ollama"]
+        LLM["LLMProvider.chat_with_tools()<br/>Gemini 3.5 Flash-Lite (default) · Claude · Ollama"]
         REG["Tool registry<br/>Pydantic arg schemas"]
         POL{"Policy layer<br/>allow · ask · deny"}
     end
@@ -86,9 +102,9 @@ flowchart TB
  5. user taps Yes → action executes → agent run resumes → replies with result
 ```
 
-## 4. Components
+## 5. Components
 
-### 4.1 Agent loop (`app/agent_core/loop.py`)
+### 5.1 Agent loop (`app/agent_core/loop.py`)
 - Hand-written, ~150 lines. Input: a *goal* (user message, SMS event, or cron
   goal) plus context (user, date in user's timezone, short history).
 - Loop: call model with tools → execute returned tool calls → append results →
@@ -99,7 +115,7 @@ flowchart TB
   of the loop. Provider errors become `LLMDecisionError` (fixes the current
   leak of raw SDK exceptions).
 
-### 4.2 LLM provider (`app/llm/`)
+### 5.2 LLM provider (`app/llm/`)
 - Add one method to the existing `LLMProvider` Protocol:
   `chat_with_tools(messages, tools) -> AssistantTurn` where `AssistantTurn`
   is our own Pydantic model (`text | tool_calls`, `usage`). Each provider maps
@@ -107,7 +123,7 @@ flowchart TB
 - Keep existing structured-output methods (`parse_transaction`,
   `extract_receipt`) — single-shot extraction doesn't need an agent.
 
-### 4.3 Tools (`app/agent_core/tools/`)
+### 5.3 Tools (`app/agent_core/tools/`)
 Each tool = a plain async function + a Pydantic args model (schema generated,
 never hand-written) + metadata `kind: read|write`.
 
@@ -120,7 +136,7 @@ never hand-written) + metadata `kind: read|write`.
 | `recall_merchant` | `set_budget`, `remember_merchant` |
 | | `ask_user` (always allowed — it *is* the safe path) |
 
-### 4.4 Policy layer (`app/agent_core/policy.py`)
+### 5.4 Policy layer (`app/agent_core/policy.py`)
 Pure function, fully unit-tested: `check(call, run_ctx) -> Allow | Ask(reason) | Deny(reason)`.
 Rules (generalizing today's `_apply_guard` / `_apply_duplicate_guard`):
 
@@ -132,32 +148,32 @@ Rules (generalizing today's `_apply_guard` / `_apply_duplicate_guard`):
 5. Records must belong to the requesting user → otherwise **Deny**.
 6. Destructive actions (delete, overwrite a user-set category) → always **Ask**.
 
-### 4.5 Human-in-the-loop
+### 5.5 Human-in-the-loop
 - `pending_actions` table holds the proposed tool call, its reason, and the
   paused `agent_run_id`. Inline button callback `pa:<id>:yes|no`.
 - Callback handler checks the action belongs to the tapping chat (fixes the
   current missing ownership check), executes or rejects, then resumes the run.
 
-### 4.6 Memory
+### 5.6 Memory
 - **Short-term:** last 10 turns from `conversation_messages`.
 - **Long-term:** merchant memory upgraded from exact match to fuzzy match with
   Postgres `pg_trgm` similarity (`ZOMATO LTD` ≈ `zomato@hdfc`).
   Embeddings/pgvector only if evals show trigram matching is not enough.
 
-### 4.7 Observability
+### 5.7 Observability
 - `agent_runs` (goal, trigger, status, total tokens, cost, latency) and
   `agent_steps` (each model call/tool call with args, result summary, policy
   verdict, latency). A `/trace <run>` admin command prints a run.
 - Prompts are versioned constants (`PROMPT_VERSION`) recorded on every run.
 
-### 4.8 Safety and hygiene
+### 5.8 Safety and hygiene
 - `ALLOWED_CHAT_IDS` allowlist + per-user daily LLM-call budget.
 - PII redaction before any LLM call (mask account numbers, phones, UPI refs).
 - Webhook: dedupe by `update_id`, ack Telegram fast, process in background.
 - Per-user timezone (`users.timezone`, default `Asia/Kolkata`); one
   `today_for(user)` helper replaces every `date.today()`.
 
-## 5. Technology decisions
+## 6. Technology decisions
 
 | Area | Decision | Why | Rejected |
 |---|---|---|---|
@@ -165,8 +181,8 @@ Rules (generalizing today's `_apply_guard` / `_apply_duplicate_guard`):
 | Bot | Keep python-telegram-bot | Inline buttons = free HITL UI | Web UI (non-goal) |
 | Agent framework | **Hand-written loop** | ~150 lines, full control, easy to explain in interviews, no hidden prompts | LangChain, LangGraph, CrewAI |
 | Tool calling | Native tool/function calling of each provider, behind `LLMProvider` | Reuses existing provider boundary | Prompted JSON "ReAct" parsing (brittle) |
-| Primary agent model | Claude (Sonnet-class) | Most reliable multi-step tool use | — |
-| Free / cheap option | Gemini Flash-Lite (`-latest` alias) | Free tier, supports function calling | — |
+| Default agent model | **Gemini 3.5 Flash-Lite** (`LLM_MODEL=gemini-3.5-flash-lite`, stable GA id) | Low cost, fast, supports function calling and image input (receipts) | — |
+| Optional comparison model | Claude (Sonnet-class) | Stronger multi-step tool use; used in evals to show the cost/accuracy tradeoff | — |
 | Local dev | Ollama `qwen2.5` 7B (tool-capable) | Free, offline; evals show its gap honestly | — |
 | Database | Keep Postgres (Neon) + SQLAlchemy async + Alembic | One store for ledger, state, memory, traces | Redis, separate vector DB |
 | Fuzzy memory | `pg_trgm` | Built into Postgres, no new infra | pgvector (add only if evals need it) |
@@ -176,11 +192,14 @@ Rules (generalizing today's `_apply_guard` / `_apply_duplicate_guard`):
 | Deploy | Keep Docker on Hugging Face Spaces | Already in place | — |
 | Quality | Keep ruff + mypy + pytest in CI | Already in place | — |
 
-## 6. Data model changes
+## 7. Data model changes
 
 | Table | Purpose |
 |---|---|
 | `users.timezone` (new column) | Correct "today" / month boundaries |
+| `salary_profiles.savings_pct` (new column) | The user's savings rule, e.g. 80 = move 80% of salary to savings |
+| `own_accounts` | The user's own account identifiers (last 4 digits / UPI id of the savings account) so transfers in both directions are recognized as self-transfers, not spend or income |
+| `incomes.kind` (new column) | `salary` / `savings_withdrawal` / `refund` / `other` — so money pulled back from savings is never counted as income |
 | `agent_runs` | One row per agent run: trigger, goal, status (`running/paused/done/failed`), tokens, cost, latency, prompt version |
 | `agent_steps` | Ordered steps of a run: model turn or tool call, args, result summary, policy verdict |
 | `pending_actions` | Proposed write awaiting user approval, linked to a paused run |
@@ -191,7 +210,66 @@ Existing tables (`transactions`, `expenses`, `incomes`, `budgets`,
 `salary_profiles`, `merchant_categories`, …) stay. `reconciliation_runs` and
 `audit_runs` remain for history; new runs are traced in `agent_runs`.
 
-## 7. Evaluation plan
+## 8. Example flow: the 80/20 salary rule
+
+The user's habit: when salary arrives, move 80% to the savings account and
+live on the remaining 20%. If the 20% runs out, pull some money back from
+savings. Setup once: `/salary 50000 savings=80% payday=1` and
+`/myaccount savings 4321` (last 4 digits of the savings account).
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as User
+    participant B as Bot (ingestion)
+    participant A as Agent
+    participant P as Policy
+    participant D as Postgres
+
+    U->>B: Forward "Rs.50,000 credited ... SALARY"
+    B->>D: incomes(kind=salary, 50,000)
+    B->>A: event: salary_credited
+    A->>D: get_month_plan → spend budget = 20% × 50,000 = 10,000
+    A-->>U: "Salary received. Move Rs.40,000 to savings. Budget this month: Rs.10,000"
+
+    U->>B: Forward "Rs.40,000 debited ... to A/c XX4321"
+    B->>D: match own_accounts → expense(category=Savings) — not spend
+    A-->>U: "Rs.40,000 moved to savings ✅"
+
+    loop Every day spending comes in
+        U->>B: Forward spend SMS
+        B->>A: event: new transaction
+        A->>P: log_expense(...)
+        P-->>A: allow (or ask if unsure)
+        A->>D: expense saved; budget_used recalculated in code
+    end
+    A-->>U: Alerts at 50% / 80% / 100% of Rs.10,000 (sent once each)
+
+    U->>B: Forward "Rs.3,000 credited ... from A/c XX4321"
+    B->>D: match own_accounts → incomes(kind=savings_withdrawal) — NOT income
+    A-->>U: "Rs.3,000 taken back from savings. Real savings now Rs.37,000 (74%, target 80%)"
+
+    Note over A,D: 1st of next month — audit goal
+    A->>D: get_month_snapshot (all numbers computed in code)
+    A-->>U: Report: salary 50,000 · spent 13,000 (budget 10,000)<br/>· saved 40,000 − 3,000 = 37,000 (74%) · tips to stay in budget
+```
+
+What is computed in code (never by the model):
+
+| Number | Formula |
+|---|---|
+| Monthly spend budget | `salary_received × (100 − savings_pct) / 100` |
+| Amount to move to savings | `salary_received × savings_pct / 100` |
+| Budget used | sum of this month's expenses, excluding `Savings` category |
+| Taken back from savings | sum of `incomes` where `kind = savings_withdrawal` this month |
+| Real savings | moved to savings − taken back from savings |
+| Real savings % | real savings ÷ salary received × 100 |
+
+What the model does: picks the tools, writes the short messages and monthly
+tips, and asks the user when an SMS is unclear (e.g. a transfer to an
+account it doesn't recognize).
+
+## 9. Evaluation plan
 
 - `evals/scenarios/*.jsonl` — 50–100 scenarios. Each: seed DB state, input
   (SMS / chat / goal), expected outcome (final ledger state, required/forbidden
@@ -206,7 +284,7 @@ Existing tables (`transactions`, `expenses`, `incomes`, `budgets`,
 - Baseline: run the **current pipeline** on the same scenarios first, so the
   agent's improvement is measured, not claimed.
 
-## 8. Phased plan
+## 10. Phased plan
 
 | Phase | Work | Done when |
 |---|---|---|
@@ -214,10 +292,11 @@ Existing tables (`transactions`, `expenses`, `incomes`, `budgets`,
 | 1. Eval baseline | Scenario format, runner, scorers, 50+ scenarios, baseline report of current pipeline | Baseline numbers committed |
 | 2. Agent core | `chat_with_tools` in 3 providers, tool registry, policy layer, loop, tracing tables | Reconcile goal runs through the agent; policy 100% unit-tested |
 | 3. HITL + chat | `pending_actions`, pause/resume, conversational mode replaces `/ask` | Multi-step chat scenarios pass |
+| 3b. Savings rule | `savings_pct`, `own_accounts`, `incomes.kind`, savings-withdrawal detection, 50/80/100% budget alerts (§8) | 80/20 scenarios pass in evals |
 | 4. Proactive + memory | Cron goals (reconcile, audit, alerts) via agent; `pg_trgm` merchant memory | Eval report: agent vs. baseline, per provider |
 | 5. Polish | README rewritten around results, architecture diagram, demo GIF | Resume bullets backed by real numbers |
 
-## 9. Risks
+## 11. Risks
 
 | Risk | Mitigation |
 |---|---|

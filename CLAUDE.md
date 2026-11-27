@@ -46,6 +46,13 @@ python -m scripts.try_decide --both    # Ollama + Claude side by side (needs ANT
 
 ## Code standards
 
+**Keep code beginner-simple** (the owner's standing rule — see
+`docs/AGENT_DESIGN.md` §2): plain functions and simple `for`/`if` over clever
+abstractions, small well-named functions, no metaprogramming or registration
+magic, and every money rule as plain Python with a unit test. Good engineering
+still applies (types, tests, ruff/mypy clean).
+
+
 Ruff (lint + format) and mypy are configured in `pyproject.toml`:
 
 ```bash
