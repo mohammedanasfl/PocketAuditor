@@ -1,6 +1,6 @@
 # PocketAuditor v2 — Agent Design
 
-Status: **Proposed** · Coding rule: see §2 · Scope: turn the fixed reconcile/audit pipelines into one
+Status: **Implemented** (phases 0–5, see §12) · Coding rule: see §2 · Scope: turn the fixed reconcile/audit pipelines into one
 tool-using agent, without losing the guarantees the current code already gives.
 
 ## 1. Goals and non-goals
@@ -344,3 +344,27 @@ SMS is unclear — e.g. a transfer to an account it doesn't recognize
 | Prompt injection via SMS text | SMS content passed as data, policy enforces rules regardless of model output; injection scenarios in evals |
 | Dev depends on internet + Gemini API key | Tests use a fake provider (offline); a separate dev key with its own quota |
 | Scope creep | Non-goals list above; each phase has an exit criterion |
+
+## 12. What was built, and where it differs from this plan
+
+Everything in §10 was built and is covered by offline tests (300+) and the
+offline evals. Where the code is simpler than the plan above, the simpler
+version won (coding rule, §2):
+
+| Plan | Built | Why |
+|---|---|---|
+| `users.timezone` column | One `TIMEZONE` setting (`app/timeutil.py`) | Single-user bot; one setting is enough and simpler |
+| HITL: pause the agent run and resume it after the tap | The approved `PendingAction` is executed by plain code (`agent_core/actions.py`); the run is already finished | No stored model state to resume; the model is not needed after the user decided |
+| Fuzzy merchant memory with `pg_trgm` | `difflib` + word overlap in Python (`merchant_memory.py`), only when all similar merchants agree | No Postgres extension; works the same on SQLite tests |
+| Cron goals (audit, alerts) through the agent | Audit and alerts stay deterministic; the LLM writes only the audit prose | Numbers must be exact; reconcile cron does use the agent |
+| Fixed calendar month | Budget month starts on payday (`month_plan.plan_period`) | Salary paid on the 28th–31st is spent in the next month |
+| — | Savings bank's own SMS for a transfer is skipped (`savings.is_savings_side_of_a_transfer`) | Otherwise forwarding both sides counts the move twice |
+| — | Text routed to SMS vs. chat by plain code (`parser.looks_like_bank_sms`) | "did my salary of Rs 50000 get credited?" must never become an income row |
+
+Each phase was reviewed by an independent reviewer agent; every confirmed
+finding was fixed with a regression test (`tests/test_phase0_regressions.py`,
+the "review" sections of `tests/test_agent_core.py` and
+`tests/test_chat_and_savings.py`).
+
+Still to do with a real API key: run `evals/` against Gemini and Claude for
+both engines and put the numbers in the README.

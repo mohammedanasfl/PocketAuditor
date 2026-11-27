@@ -27,7 +27,13 @@ from app.llm.base import LLMDecisionError, LLMProvider
 from app.models import Expense, Income, Transaction, User
 from app.parser import ParseError, parse_sms
 from app.salary import get_salary_profile
-from app.savings import SAVINGS_WITHDRAWAL, income_kind, is_transfer_to_savings, savings_accounts
+from app.savings import (
+    SAVINGS_WITHDRAWAL,
+    income_kind,
+    is_savings_side_of_a_transfer,
+    is_transfer_to_savings,
+    savings_accounts,
+)
 from app.timeutil import local_today
 
 logger = logging.getLogger(__name__)
@@ -91,6 +97,7 @@ class SmsIngestResult:
         "savings_withdrawal",
         "parse_error",
         "already_seen",
+        "savings_side_skipped",
     ]
     amount: Decimal | None = None
     merchant: str | None = None
@@ -114,6 +121,10 @@ async def ingest_sms_transaction(
         return SmsIngestResult(outcome="already_seen")
 
     savings_last4s = await savings_accounts(session, user.id)
+
+    if is_savings_side_of_a_transfer(raw_text, parsed.is_debit, savings_last4s):
+        logger.info("user=%s: savings account's side of a transfer — counted from the other side, skipping", user.id)
+        return SmsIngestResult(outcome="savings_side_skipped", amount=parsed.amount, txn_date=parsed.txn_date)
 
     if not parsed.is_debit:
         # Money-in: record it in the incomes ledger, labelled (salary / refund

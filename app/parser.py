@@ -153,13 +153,34 @@ def _parse_direction(text: str) -> bool | None:
     return None
 
 
+# Things only a bank/UPI message contains: an account, card or UPI reference.
+_BANK_MARKER_RE = re.compile(
+    r"\b(?:a/c|acct|account|upi|vpa|neft|imps|rtgs|ref(?:no)?|avl|card|bank|txn)\b|[xX*]{2,}\d{3,}",
+    re.IGNORECASE,
+)
+# "debited by 20.0" — SBI writes amounts with no Rs/INR in front.
+_BARE_AMOUNT_RE = re.compile(r"\b(?:debited|credited)\b\W+(?:by|for|with)?\s*\d", re.IGNORECASE)
+# How a person (not a bank) starts a message: a question, or "I ..." / "my ...".
+_PERSON_START_RE = re.compile(
+    r"^\s*(?:how|what|why|when|where|which|who|did|does|do|is|are|was|can|could|should|will|would|"
+    r"please|pls|log|set|show|tell|i|i'm|im|my|me|we|hey|hi|hello)\b",
+    re.IGNORECASE,
+)
+
+
 def looks_like_bank_sms(text: str) -> bool:
-    """Cheap first check (no LLM) to route a Telegram text message: a bank
-    SMS has an amount AND says money moved (or will move / is an OTP).
-    Everything else is treated as a chat message for the agent."""
-    if _parse_amount(text) is None:
+    """Route a Telegram text message, without an LLM: True for a forwarded
+    bank/UPI SMS, False for a chat message to the agent.
+
+    A bank SMS mentions an account/UPI/card AND an amount, and doesn't start
+    the way a person writes ("did my salary of Rs 50000 get credited?" is a
+    question, not an SMS)."""
+    if _PERSON_START_RE.search(text):
         return False
-    return bool(_DEBIT_RE.search(text) or _CREDIT_RE.search(text) or is_not_a_transaction(text))
+    if not _BANK_MARKER_RE.search(text):
+        return False
+    has_amount = _parse_amount(text) is not None or _BARE_AMOUNT_RE.search(text) is not None
+    return has_amount or is_not_a_transaction(text)
 
 
 def is_not_a_transaction(text: str) -> bool:

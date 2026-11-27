@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID
 
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.budgets import upsert_budget
@@ -30,18 +31,22 @@ async def resolve_pending_action(
     """Apply (or drop) a waiting action. Returns (action, message for the user).
     The action is None if it doesn't exist, isn't this user's, or was
     already answered (e.g. a double tap)."""
-    action = await session.get(PendingAction, action_id)
-    if action is None or action.user_id != user_id or action.status != "waiting":
+    # Claim the action in ONE statement: only the first of two quick taps
+    # changes 'waiting' to an answer, so a double tap can't apply it twice.
+    claim = await session.execute(
+        update(PendingAction)
+        .where(PendingAction.id == action_id, PendingAction.user_id == user_id, PendingAction.status == "waiting")
+        .values(status="approved" if approved else "rejected", resolved_at=datetime.now(UTC))
+    )
+    await session.commit()
+    if claim.rowcount != 1:  # type: ignore[attr-defined]
         return None, "This was already answered."
 
-    action.resolved_at = datetime.now(UTC)
+    action = await session.get(PendingAction, action_id)
+    assert action is not None
+    await session.refresh(action)
     if not approved:
-        action.status = "rejected"
-        await session.commit()
         return action, "OK, I didn't change anything."
-
-    action.status = "approved"
-    await session.commit()
     message = await _apply(session, action)
     logger.info("pending action=%s (%s) applied for user=%s", action.id, action.tool_name, user_id)
     return action, message

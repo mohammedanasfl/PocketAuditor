@@ -9,6 +9,7 @@ Run on 2026-11-27.
 | Unnecessary asks | 0 |
 | LLM calls | 5 (0.2 per scenario) |
 | LLM time | 0.0s (0.00s per scenario) |
+| Agent tokens | 0 (0 per scenario) |
 
 | Scenario | Expected | Got | Result |
 |---|---|---|---|

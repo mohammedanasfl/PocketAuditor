@@ -69,7 +69,7 @@ async def _handle_sms(update: Update, context: ContextTypes.DEFAULT_TYPE, raw_te
         if result.outcome == "transaction_created":
             # Decide it now (agent or pipeline) instead of waiting for /reconcile.
             summary = await reconcile(session, provider, user.id, trigger="sms")
-        if result.outcome not in ("parse_error", "already_seen"):
+        if result.outcome not in ("parse_error", "already_seen", "savings_side_skipped"):
             plan = await get_month_plan(session, user.id)
             alerts = await check_money_alerts(session, user.id)
 
@@ -79,6 +79,13 @@ async def _handle_sms(update: Update, context: ContextTypes.DEFAULT_TYPE, raw_te
             "I couldn't find a transaction in that message — forward the original bank/UPI "
             "SMS, or if this was cash with no bank alert, log it directly: "
             "/log <category> <amount>, e.g. /log Food 900"
+        )
+        return
+
+    if result.outcome == "savings_side_skipped":
+        await update.message.reply_text(
+            "That's your savings account's side of a transfer. I count transfers from your main (salary) "
+            "account's SMS, so I skipped this one to avoid counting it twice."
         )
         return
 

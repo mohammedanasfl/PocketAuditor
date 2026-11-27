@@ -8,6 +8,7 @@ from datetime import date
 from decimal import Decimal
 from types import SimpleNamespace
 
+import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -154,7 +155,10 @@ async def test_invalid_chat_changes_are_denied_before_asking_the_user(db_session
 
 def test_bank_sms_and_chat_messages_are_told_apart_without_an_llm():
     assert looks_like_bank_sms("Rs.450.00 debited from A/c XX1234 on 10-11-26 to BLINKIT")
-    assert looks_like_bank_sms("Your OTP for payment of Rs.2000 is 123456")
+    assert looks_like_bank_sms("Dear UPI user A/C X1234 debited by 20.0 on date 22Nov26 trf to SWIGGY")
+    assert not looks_like_bank_sms("Did my salary of Rs 50000 get credited?")
+    assert not looks_like_bank_sms("why was Rs.1200 debited at Swiggy on 05-11-26?")
+    assert not looks_like_bank_sms("I paid Rs 200 cash for lunch, please log it")
     assert not looks_like_bank_sms("how much did I spend on food this week?")
     assert not looks_like_bank_sms("set my shopping budget to 3000")
 
@@ -300,6 +304,7 @@ async def test_spending_before_saving_uses_the_whole_salary(db_session):
 def _plan(spent: str, spending_money: str = "10000", day: int = 10) -> MonthPlan:
     return MonthPlan(
         month_start=date(2026, 11, 1),
+        month_end=date(2026, 11, 30),
         today=date(2026, 11, day),
         salary=Decimal(spending_money),
         other_income=Decimal("0"),
@@ -346,3 +351,76 @@ def test_audit_does_not_count_a_savings_withdrawal_as_income():
     )
     assert snapshot.total_income == Decimal("50000")
     assert snapshot.taken_back_from_savings == Decimal("3000")
+
+
+# --- fixes from the Phase 3 review --------------------------------------------
+
+
+def test_budget_month_starts_on_payday():
+    from app.month_plan import plan_period
+
+    assert plan_period(date(2026, 11, 15), None) == (date(2026, 11, 1), date(2026, 11, 30))
+    assert plan_period(date(2026, 11, 15), 1) == (date(2026, 11, 1), date(2026, 11, 30))
+    assert plan_period(date(2026, 11, 29), 28) == (date(2026, 11, 28), date(2026, 12, 27))
+    assert plan_period(date(2026, 12, 5), 28) == (date(2026, 11, 28), date(2026, 12, 27))
+    assert plan_period(date(2026, 3, 10), 28) == (date(2026, 2, 28), date(2026, 3, 27))
+
+
+async def test_salary_paid_on_the_28th_counts_for_the_month_it_is_spent_in(db_session):
+    from app.models import SalaryProfile
+
+    user = await _user(db_session)
+    db_session.add(SalaryProfile(user_id=user.id, expected_salary=Decimal("50000"), payday_day=28))
+    db_session.add(
+        Income(user_id=user.id, amount=Decimal("50000"), txn_date=date(2026, 11, 28), raw_text="s", kind="salary")
+    )
+    await db_session.commit()
+
+    plan = await get_month_plan(db_session, user.id, today=date(2026, 12, 3))
+
+    assert plan.salary == Decimal("50000")
+    assert plan.month_start == date(2026, 11, 28)
+
+
+@pytest.mark.parametrize(
+    "sms",
+    [
+        "Rs 35,000.00 credited to A/c XX4321 on 01-11-26 from A/c XX1234 via IMPS",
+        "Rs.3,000.00 transferred from A/c XX4321 on 20-11-26 to A/c XX1234",
+    ],
+)
+async def test_the_savings_banks_own_side_of_a_transfer_is_skipped(db_session, sms):
+    user = await _user(db_session)
+    db_session.add(OwnAccount(user_id=user.id, last4="4321", kind="savings"))
+    await db_session.commit()
+
+    result = await ingest_sms_transaction(db_session, user, sms, _NoLLM())
+
+    assert result.outcome == "savings_side_skipped"
+    assert (await db_session.execute(select(func.count()).select_from(Income))).scalar_one() == 0
+    assert (await db_session.execute(select(func.count()).select_from(Expense))).scalar_one() == 0
+
+
+async def test_spend_from_the_savings_account_to_a_shop_is_still_spending(db_session):
+    user = await _user(db_session)
+    db_session.add(OwnAccount(user_id=user.id, last4="4321", kind="savings"))
+    await db_session.commit()
+
+    result = await ingest_sms_transaction(
+        db_session, user, "Rs.500 sent to Ramesh via UPI on 12-11-26. A/c XX4321 debited.", _NoLLM()
+    )
+
+    assert result.outcome == "transaction_created"
+
+
+async def test_double_tap_on_yes_applies_the_change_once(db_session):
+    user = await _user(db_session)
+    provider = ScriptedChatProvider([calls(("log_cash_expense", {"category": "Food", "amount": "90"})), answer("ok")])
+    reply = await answer_chat(db_session, provider, user.id, "log 90 food")
+    action_id = reply.confirmations[0].id
+
+    first, _ = await resolve_pending_action(db_session, action_id, user_id=user.id, approved=True)
+    second, _ = await resolve_pending_action(db_session, action_id, user_id=user.id, approved=True)
+
+    assert first is not None and second is None
+    assert (await db_session.execute(select(func.count()).select_from(Expense))).scalar_one() == 1

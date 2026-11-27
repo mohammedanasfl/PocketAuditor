@@ -27,8 +27,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app import models  # noqa: F401  (registers all tables on Base.metadata)
 from app.db import Base
 from app.models import Expense, Income, MerchantCategory, OwnAccount, ReconciliationRun, Transaction, User
-from app.savings import SAVINGS_WITHDRAWAL
 from app.parser import ParseError, parse_sms
+from app.savings import SAVINGS_WITHDRAWAL
 from evals.engines import ENGINES
 from evals.providers import CountingProvider, make_provider
 

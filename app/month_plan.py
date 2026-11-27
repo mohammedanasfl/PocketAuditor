@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.categories import SAVINGS_CATEGORY
 from app.db import insert_once
 from app.models import AuditAlertSent, Expense, Income
+from app.salary import get_salary_profile
 from app.savings import SAVINGS_WITHDRAWAL
 from app.timeutil import local_today
 
@@ -35,9 +36,33 @@ from app.timeutil import local_today
 _MIN_DAY_FOR_PACE_ALERT = 7
 
 
+def plan_period(today: date, payday: int | None) -> tuple[date, date]:
+    """The budget month that contains `today`, as (first day, last day).
+
+    It starts on payday, because salary is what you spend from: with payday
+    28, the budget month runs from the 28th to the 27th, so a salary paid on
+    28 Nov counts for the month you actually spend it in. Without a payday
+    (or payday 1) it is the calendar month."""
+    if payday is None or payday <= 1:
+        start = today.replace(day=1)
+    elif today.day >= payday:
+        start = today.replace(day=payday)
+    else:
+        last_day_of_previous_month = today.replace(day=1) - timedelta(days=1)
+        start = last_day_of_previous_month.replace(day=min(payday, last_day_of_previous_month.day))
+
+    first_of_next_month = (start.replace(day=1) + timedelta(days=32)).replace(day=1)
+    next_start = first_of_next_month
+    if payday is not None and payday > 1:
+        days_in_next_month = calendar.monthrange(first_of_next_month.year, first_of_next_month.month)[1]
+        next_start = first_of_next_month.replace(day=min(payday, days_in_next_month))
+    return start, next_start - timedelta(days=1)
+
+
 @dataclass
 class MonthPlan:
-    month_start: date
+    month_start: date  # first day of the budget month (payday, or the 1st)
+    month_end: date  # last day of the budget month
     today: date
     salary: Decimal
     other_income: Decimal
@@ -66,8 +91,9 @@ class MonthPlan:
         return (self.saved / self.salary * 100).quantize(Decimal("0.1"))
 
     @property
-    def days_in_month(self) -> int:
-        return calendar.monthrange(self.today.year, self.today.month)[1]
+    def days_so_far(self) -> int:
+        """Days of the budget month so far, including today."""
+        return (self.today - self.month_start).days + 1
 
     @property
     def run_out_date(self) -> date | None:
@@ -75,14 +101,17 @@ class MonthPlan:
         None if nothing was spent yet, or it lasts past the month end."""
         if self.spent <= 0 or self.money_left <= 0:
             return None
-        daily_spend = self.spent / self.today.day
+        daily_spend = self.spent / self.days_so_far
         days_left = int(self.money_left / daily_spend)
         run_out = self.today + timedelta(days=days_left)
-        month_end = self.month_start.replace(day=self.days_in_month)
-        return run_out if run_out < month_end else None
+        return run_out if run_out < self.month_end else None
 
     def as_message(self) -> str:
-        lines = [f"📅 {calendar.month_name[self.month_start.month]} so far"]
+        if self.month_start.day == 1:
+            title = f"📅 {calendar.month_name[self.month_start.month]} so far"
+        else:
+            title = f"📅 Since payday ({self.month_start:%d %b})"
+        lines = [title]
         lines.append(f"Salary: Rs.{self.salary:,.2f}")
         if self.other_income > 0:
             lines.append(f"Other income: Rs.{self.other_income:,.2f}")
@@ -128,9 +157,11 @@ async def _expense_sum(session: AsyncSession, user_id: UUID, start: date, end: d
 
 async def get_month_plan(session: AsyncSession, user_id: UUID, *, today: date | None = None) -> MonthPlan:
     today = today or local_today()
-    start = today.replace(day=1)
+    profile = await get_salary_profile(session, user_id)
+    start, end = plan_period(today, profile.payday_day if profile else None)
     return MonthPlan(
         month_start=start,
+        month_end=end,
         today=today,
         salary=await _income_sum(session, user_id, start, today, ["salary"]),
         other_income=await _income_sum(session, user_id, start, today, ["other", "refund"]),
@@ -180,7 +211,7 @@ def money_alerts_for(plan: MonthPlan) -> list[MoneyAlert]:
             )
         )
 
-    if plan.today.day >= _MIN_DAY_FOR_PACE_ALERT and plan.run_out_date is not None:
+    if plan.days_so_far >= _MIN_DAY_FOR_PACE_ALERT and plan.run_out_date is not None:
         alerts.append(
             MoneyAlert(
                 "fast_pace",

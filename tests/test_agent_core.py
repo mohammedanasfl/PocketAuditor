@@ -469,3 +469,29 @@ async def test_remembered_merchant_double_charge_is_asked_without_the_model(db_s
 
     assert summary.asked_user == 1
     assert provider.calls == 0
+
+
+async def test_two_sms_arriving_together_do_not_log_the_same_transaction_twice(tmp_path):
+    import asyncio
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.db import Base
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'race.db'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(bind=engine, expire_on_commit=False)
+    async with factory() as session:
+        user, _ = await _user_and_txn(session)
+
+    async def one_webhook_task() -> None:
+        log_food = calls(("log_as_new_expense", {"category": "Food", "confidence": 0.95, "reason": "x"}))
+        async with factory() as session:
+            await reconcile_with_agent(session, ScriptedChatProvider([log_food, answer("ok")]), user.id)
+
+    await asyncio.gather(one_webhook_task(), one_webhook_task())
+
+    async with factory() as session:
+        assert len(await _expenses(session)) == 1
+    await engine.dispose()

@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID
 
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.merchant_memory import remember_merchant_category
@@ -55,9 +56,19 @@ async def resolve_ask_user_answer(
     `user_id` is the user who tapped the button: a run belonging to anyone
     else is treated as not found, so nobody can answer another user's
     question."""
-    run = await session.get(ReconciliationRun, run_id)
-    if run is None or run.user_id != user_id or run.status != "open":
+    # Claim the question in ONE statement, so a double tap on two buttons
+    # can't create two expenses.
+    claim = await session.execute(
+        update(ReconciliationRun)
+        .where(ReconciliationRun.id == run_id, ReconciliationRun.user_id == user_id, ReconciliationRun.status == "open")
+        .values(status="resolved", resolved_at=datetime.now(UTC))
+    )
+    if claim.rowcount != 1:  # type: ignore[attr-defined]
+        await session.rollback()
         return None
+    run = await session.get(ReconciliationRun, run_id)
+    assert run is not None
+    await session.refresh(run)
 
     txn = await session.get(Transaction, run.transaction_id)
     # A ReconciliationRun always references a real Transaction (foreign key,
@@ -76,8 +87,6 @@ async def resolve_ask_user_answer(
     session.add(expense)
 
     txn.status = "processed"
-    run.status = "resolved"
-    run.resolved_at = datetime.now(UTC)
 
     await remember_merchant_category(session, run.user_id, txn.merchant, category)
 

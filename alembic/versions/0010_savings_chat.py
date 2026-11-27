@@ -19,6 +19,14 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     op.add_column("incomes", sa.Column("kind", sa.String(20), nullable=False, server_default="other"))
+    # Label incomes saved before this migration, the same way app/savings.py
+    # labels new ones (by the SMS text; amount-vs-profile matching only
+    # applies to new SMS).
+    op.execute("UPDATE incomes SET kind = 'salary' WHERE lower(raw_text) LIKE '%salary%'")
+    op.execute(
+        "UPDATE incomes SET kind = 'refund' WHERE kind = 'other' AND ("
+        "lower(raw_text) LIKE '%refund%' OR lower(raw_text) LIKE '%reversal%' OR lower(raw_text) LIKE '%cashback%')"
+    )
     op.create_table(
         "own_accounts",
         sa.Column("id", sa.Uuid(), primary_key=True),
